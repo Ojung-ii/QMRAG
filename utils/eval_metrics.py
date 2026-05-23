@@ -1,7 +1,10 @@
 from __future__ import annotations
 from collections import Counter
+from datetime import datetime
+import json
 from typing import Any, Mapping, Sequence
 from .text import normalize_answer, token_count
+from .generation import has_idk_phrase, is_insufficient_prediction
 
 def exact_match(pred: str, golds: Sequence[str]) -> float:
     p=normalize_answer(pred); return float(any(p==normalize_answer(g) for g in golds if str(g).strip()))
@@ -17,6 +20,30 @@ def answer_f1(pred: str, golds: Sequence[str]) -> float:
 def answer_contains(pred: str, golds: Sequence[str]) -> float:
     p=normalize_answer(pred)
     return float(any(normalize_answer(g) and normalize_answer(g) in p for g in golds))
+
+def text_has_gold(text: Any, golds: Sequence[str]) -> float:
+    ctx=str(text or "")
+    ctx_l=ctx.lower(); ctx_norm=normalize_answer(ctx)
+    for gold in golds:
+        g=str(gold).strip()
+        if not g:
+            continue
+        if g.lower() in ctx_l or normalize_answer(g) in ctx_norm:
+            return 1.0
+    return 0.0
+
+def answer_in_evidence_bundles(row: Mapping[str,Any], golds: Sequence[str]) -> float:
+    try:
+        ctx=json.dumps(row.get("evidence_bundles",[]) or [], ensure_ascii=False)
+    except Exception:
+        ctx=str(row.get("evidence_bundles",[]) or "")
+    return text_has_gold(ctx,golds)
+
+def answer_in_rendered_context(row: Mapping[str,Any], golds: Sequence[str]) -> float:
+    ctx=row.get("rendered_context")
+    if ctx is None:
+        ctx=row.get("rendered_context_preview","")
+    return text_has_gold(ctx,golds)
 def support_title_recall(row: Mapping[str,Any]) -> float:
     gold={str(x).strip().lower() for x in row.get("support_titles",[]) if str(x).strip()}
     if not gold: return 0.0
@@ -31,22 +58,60 @@ def context_tokens(row: Mapping[str,Any]) -> int:
     d=row.get("retrieval_diagnostics",{}) or {}
     if d.get("context_tokens") is not None: return int(d.get("context_tokens") or 0)
     return 0
-def evaluate_predictions(rows: Sequence[Mapping[str,Any]]) -> dict[str,Any]:
+
+def bridge_stats(row: Mapping[str,Any]) -> dict[str,float]:
+    bundles=row.get("evidence_bundles",[]) or []
+    titles=set()
+    bridge_bundles=0
+    chain_complete=0
+    for bundle in bundles:
+        for title in bundle.get("bridge_titles",[]) or []:
+            titles.add(str(title))
+        if bundle.get("has_bridge"):
+            bridge_bundles+=1
+        if bundle.get("chain_complete"):
+            chain_complete+=1
+    rd=row.get("retrieval_diagnostics",{}) or {}
+    return {
+        "bridge_title_count":float(rd.get("bridge_title_count",len(titles)) or 0),
+        "bridge_bundle_count":float(rd.get("bridge_bundle_count",bridge_bundles) or 0),
+        "chain_complete_count":float(rd.get("chain_complete_count",chain_complete) or 0),
+        "has_chain_complete":1.0 if bool(rd.get("has_chain_complete",chain_complete>0)) else 0.0,
+    }
+def first_present(rows: Sequence[Mapping[str,Any]], key: str, fallback: Any=None) -> Any:
+    for row in rows:
+        value=row.get(key)
+        if value not in {None, ""}:
+            return value
+    return fallback
+
+def evaluate_predictions(rows: Sequence[Mapping[str,Any]], dataset: str | None=None, prompt_profile: str | None=None) -> dict[str,Any]:
     per=[]
     for r in rows:
-        d=r.get("retrieval_diagnostics",{}) or {}; timings=d.get("timings",{}) or {}; pred=str(r.get("prediction",'')); golds=[str(x) for x in r.get("answers",[])]
+        d=r.get("retrieval_diagnostics",{}) or {}; timings=d.get("timings",{}) or {}
+        raw_pred=str(r.get("raw_prediction", r.get("prediction", "")) or "")
+        pred=raw_pred
+        golds=[str(x) for x in r.get("answers",[])]
         ret_ms=1000*float(timings.get("total_retrieval_s",0.0)); gen_ms=1000*float(r.get("generation_latency_s",0.0))
-        per.append({"id":r.get("id"),"em":exact_match(pred,golds),"f1":answer_f1(pred,golds),"answer_contains":answer_contains(pred,golds),"support_title_recall":support_title_recall(r),"context_tokens":context_tokens(r),"latency_ms":ret_ms+gen_ms,"retrieval_latency_ms":ret_ms,"generation_latency_ms":gen_ms,"candidate_count":int(d.get("candidate_count") or 0),"seed_count":int(d.get("seed_count") or 0),"bundle_count":int(d.get("bundle_count") or 0),"dense_enabled":bool(d.get("dense_enabled",False))})
+        in_bundles=answer_in_evidence_bundles(r,golds); in_rendered=answer_in_rendered_context(r,golds); in_prediction=answer_contains(pred,golds)
+        bs=bridge_stats(r)
+        per.append({"id":r.get("id"),"em":exact_match(pred,golds),"f1":answer_f1(pred,golds),"answer_contains":in_prediction,"answer_in_context":in_bundles,"answer_in_evidence_bundles":in_bundles,"answer_in_rendered_context":in_rendered,"answer_in_prediction":in_prediction,"idk":has_idk_phrase(raw_pred),"insufficient":is_insufficient_prediction(raw_pred),"support_title_recall":support_title_recall(r),"context_tokens":context_tokens(r),"latency_ms":ret_ms+gen_ms,"retrieval_latency_ms":ret_ms,"generation_latency_ms":gen_ms,"candidate_count":int(d.get("candidate_count") or 0),"seed_count":int(d.get("seed_count") or 0),"bundle_count":int(d.get("bundle_count") or 0),"dense_enabled":bool(d.get("dense_enabled",False)),**bs})
     avg=lambda k: sum(float(x[k]) for x in per)/max(1,len(per))
-    res={"n":len(rows),"em":avg("em"),"f1":avg("f1"),"answer_contains":avg("answer_contains"),"support_title_recall":avg("support_title_recall"),"context_tokens":avg("context_tokens"),"latency_ms":avg("latency_ms"),"retrieval_latency_ms":avg("retrieval_latency_ms"),"generation_latency_ms":avg("generation_latency_ms"),"candidate_count":avg("candidate_count"),"seed_count":avg("seed_count"),"bundle_count":avg("bundle_count"),"dense_enabled_rate":sum(1.0 if x["dense_enabled"] else 0.0 for x in per)/max(1,len(per)),"per_example":per}
-    res["support_recall_per_1k_tokens"]=res["support_title_recall"]/max(1e-9,res["context_tokens"]/1000.0); return res
+    resolved_prompt=prompt_profile or first_present(rows,"prompt_profile","UNKNOWN")
+    prompt_experiment_type=first_present(rows,"prompt_experiment_type", "main_comparison" if resolved_prompt=="common_qa" else "ablation" if resolved_prompt=="qmrag_bundle_qa" else "unknown")
+    res={"dataset":dataset or first_present(rows,"dataset","UNKNOWN"),"prompt_profile":resolved_prompt,"prompt_experiment_type":prompt_experiment_type,"generation_provider":first_present(rows,"generation_provider",first_present(rows,"llm_provider","UNKNOWN")),"created_at":datetime.now().isoformat(timespec="seconds"),"n":len(rows),"em":avg("em"),"f1":avg("f1"),"answer_contains":avg("answer_contains"),"support_title_recall":avg("support_title_recall"),"context_tokens":avg("context_tokens"),"latency_ms":avg("latency_ms"),"retrieval_latency_ms":avg("retrieval_latency_ms"),"generation_latency_ms":avg("generation_latency_ms"),"candidate_count":avg("candidate_count"),"seed_count":avg("seed_count"),"bundle_count":avg("bundle_count"),"dense_enabled_rate":sum(1.0 if x["dense_enabled"] else 0.0 for x in per)/max(1,len(per)),"answer_in_context":avg("answer_in_context"),"answer_in_evidence_bundles":avg("answer_in_evidence_bundles"),"answer_in_rendered_context":avg("answer_in_rendered_context"),"answer_in_prediction":avg("answer_in_prediction"),"idk_rate":sum(1.0 if x["idk"] else 0.0 for x in per)/max(1,len(per)),"insufficient_rate":sum(1.0 if x["insufficient"] else 0.0 for x in per)/max(1,len(per)),"avg_bridge_title_count":avg("bridge_title_count"),"avg_bridge_bundle_count":avg("bridge_bundle_count"),"chain_complete_rate":sum(1.0 if x["has_chain_complete"] else 0.0 for x in per)/max(1,len(per)),"per_example":per}
+    res["support_recall_per_1k_tokens"]=res["support_title_recall"]/max(1e-9,res["context_tokens"]/1000.0)
+    res.update({"EM":res["em"],"F1":res["f1"],"AnsContains":res["answer_contains"],"SupportRecall":res["support_title_recall"],"SR/1kTok":res["support_recall_per_1k_tokens"],"CtxTok":res["context_tokens"],"LatencyMs":res["latency_ms"],"DenseRate":res["dense_enabled_rate"]})
+    return res
 def summary_markdown(dataset: str, result: Mapping[str,Any]) -> str:
-    rows=[("dataset",dataset)]
-    if result.get("prompt_profile") is not None:
-        rows.append(("prompt_profile",result.get("prompt_profile")))
+    ds=result.get("dataset") or dataset or "UNKNOWN"
+    prompt=result.get("prompt_profile") or "UNKNOWN"
+    header=["# QMRAG Evaluation Summary","",f"- dataset: {ds}",f"- prompt_profile: {prompt}",f"- n: {result.get('n',0)}",f"- generation_provider: {result.get('generation_provider','UNKNOWN')}",f"- created_at: {result.get('created_at','UNKNOWN')}",""]
+    header.insert(4, f"- prompt_experiment_type: {result.get('prompt_experiment_type','unknown')}")
+    meta=[]
     if result.get("index_source") is not None:
-        rows.append(("index_source",result.get("index_source")))
+        meta.append(("index_source",result.get("index_source")))
     if result.get("index_dir") is not None:
-        rows.append(("index_dir",result.get("index_dir")))
-    rows.extend([("n",result.get("n",0)),("EM",f"{result.get('em',0):.4f}"),("F1",f"{result.get('f1',0):.4f}"),("AnswerContains",f"{result.get('answer_contains',0):.4f}"),("SupportTitleRecall",f"{result.get('support_title_recall',0):.4f}"),("SupportRecallPer1kTokens",f"{result.get('support_recall_per_1k_tokens',0):.4f}"),("AvgContextTokens",f"{result.get('context_tokens',0):.1f}"),("AvgLatencyMs",f"{result.get('latency_ms',0):.1f}"),("AvgRetrievalLatencyMs",f"{result.get('retrieval_latency_ms',0):.1f}"),("AvgGenerationLatencyMs",f"{result.get('generation_latency_ms',0):.1f}"),("DenseEnabledRate",f"{result.get('dense_enabled_rate',0):.2f}")])
-    return "\n".join([f"# Evaluation Summary: {dataset}","","| metric | value |","|---|---:|"]+[f"| {k} | {v} |" for k,v in rows])+"\n"
+        meta.append(("index_dir",result.get("index_dir")))
+    rows=meta+[("EM",f"{result.get('em',0):.4f}"),("F1",f"{result.get('f1',0):.4f}"),("AnsContains",f"{result.get('answer_contains',0):.4f}"),("SupportRecall",f"{result.get('support_title_recall',0):.4f}"),("SR/1kTok",f"{result.get('support_recall_per_1k_tokens',0):.4f}"),("CtxTok",f"{result.get('context_tokens',0):.1f}"),("LatencyMs",f"{result.get('latency_ms',0):.1f}"),("DenseRate",f"{result.get('dense_enabled_rate',0):.2f}"),("AvgBridgeTitleCount",f"{result.get('avg_bridge_title_count',0):.2f}"),("AvgBridgeBundleCount",f"{result.get('avg_bridge_bundle_count',0):.2f}"),("ChainCompleteRate",f"{result.get('chain_complete_rate',0):.4f}"),("AnswerInEvidenceBundles",f"{result.get('answer_in_evidence_bundles',result.get('answer_in_context',0)):.4f}"),("AnswerInRenderedContext",f"{result.get('answer_in_rendered_context',0):.4f}"),("AnswerInPrediction",f"{result.get('answer_in_prediction',0):.4f}"),("IDKRate",f"{result.get('idk_rate',0):.4f}"),("InsufficientRate",f"{result.get('insufficient_rate',0):.4f}")]
+    return "\n".join(header+["| metric | value |","|---|---:|"]+[f"| {k} | {v} |" for k,v in rows])+"\n"

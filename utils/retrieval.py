@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import json
 import random
 import time
 from pathlib import Path
@@ -9,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .embedding import DenseIndex, encode_query
+from .io_utils import read_jsonl
 try:
     from .embeddings import DenseMatrixIndex, build_embedder
 except Exception:  # pragma: no cover
@@ -101,6 +103,23 @@ class QueryMedoidRetriever:
         self.chunk_bm25 = BM25Index(self.chunks, k1=float(bm25_cfg.get("k1", 1.5)), b=float(bm25_cfg.get("b", 0.75)))
         self.rng = random.Random(int(cfg.get("random_seed", 13)))
         self._embed_cache: Dict[str, Any] = {}
+        self.bridge_cfg=dict(cfg.get("bridge",{}) or {})
+        raw_index_dir=index.get("index_dir") or (index.get("meta",{}) or {}).get("index_dir")
+        self.bridge_index_dir=Path(raw_index_dir) if raw_index_dir else None
+        self.bridge_requested=bool(self.bridge_cfg.get("enabled",False))
+        self.bridge_index_loaded=False
+        self.bridge_index_warning: Optional[str]=None
+        self.prop_to_mentioned_titles: Dict[str,List[str]]={}
+        self.title_to_mentioning_props: Dict[str,List[str]]={}
+        self.title_mentions: List[Mapping[str,Any]]=[]
+        self._load_bridge_index(index)
+        self.title_mentions_by_prop: Dict[str,List[Mapping[str,Any]]] = defaultdict(list)
+        for row in self.title_mentions:
+            if row.get("prop_id"):
+                self.title_mentions_by_prop[str(row["prop_id"])].append(row)
+        self.bridge_enabled=self.bridge_requested and self.bridge_index_loaded and bool(self.prop_to_mentioned_titles)
+        if self.bridge_requested and not self.bridge_enabled:
+            self._warn_bridge(self.bridge_index_warning or "Bridge retrieval disabled because the mention bridge index is empty")
 
     def retrieve(self, question: str, metadata: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
         timings: Dict[str, float] = {}
@@ -124,7 +143,56 @@ class QueryMedoidRetriever:
             },
             dense_enabled=bool(self.dense_indexes) or self._dense_prop_matrix is not None or self._dense_chunk_matrix is not None,
         )
+        bridge_titles={t for b in bundles for t in b.get("bridge_titles",[]) or []}
+        diag_dict=diag.__dict__
+        diag_dict.update({
+            "bridge_enabled":self.bridge_enabled,
+            "bridge_index_loaded":self.bridge_index_loaded,
+            "ordering_mode":self.bridge_cfg.get("ordering","chain_aware") if self.bridge_enabled else "score",
+            "bridge_title_count":len(bridge_titles),
+            "bridge_bundle_count":sum(1 for b in bundles if b.get("has_bridge")),
+            "chain_complete_count":sum(1 for b in bundles if b.get("chain_complete")),
+            "has_chain_complete":any(bool(b.get("chain_complete")) for b in bundles),
+        })
         return {"question": question, "candidates": candidates, "seeds": seeds, "evidence_bundles": bundles, "diagnostics": diag.__dict__}
+
+    def _warn_bridge(self, message: str) -> None:
+        self.bridge_index_warning=message
+        if self.logger:
+            self.logger.log(f"WARNING: {message}")
+            if hasattr(self.logger, "event"):
+                self.logger.event({"event":"bridge.index.warning","message":message})
+
+    def _load_bridge_index(self, index: Mapping[str, Any]) -> None:
+        self.prop_to_mentioned_titles=dict(index.get("prop_to_mentioned_titles",{}) or {})
+        self.title_to_mentioning_props=dict(index.get("title_to_mentioning_props",{}) or {})
+        self.title_mentions=list(index.get("title_mentions",[]) or [])
+        in_memory_loaded=bool(self.prop_to_mentioned_titles or self.title_to_mentioning_props or self.title_mentions)
+        if self.bridge_index_dir is not None:
+            paths={
+                "prop_to_mentioned_titles": self.bridge_index_dir/"prop_to_mentioned_titles.json",
+                "title_to_mentioning_props": self.bridge_index_dir/"title_to_mentioning_props.json",
+                "title_mentions": self.bridge_index_dir/"title_mentions.jsonl",
+            }
+            missing=[str(path) for path in paths.values() if not path.exists()]
+            if not missing:
+                self.prop_to_mentioned_titles=json.loads(paths["prop_to_mentioned_titles"].read_text(encoding="utf-8"))
+                self.title_to_mentioning_props=json.loads(paths["title_to_mentioning_props"].read_text(encoding="utf-8"))
+                self.title_mentions=read_jsonl(paths["title_mentions"])
+                self.bridge_index_loaded=True
+            elif self.bridge_requested:
+                self.bridge_index_loaded=in_memory_loaded
+                self.bridge_index_warning=f"Bridge index files missing: {missing}"
+        else:
+            self.bridge_index_loaded=in_memory_loaded
+            if self.bridge_requested and not in_memory_loaded:
+                self.bridge_index_warning="Bridge index directory is unknown and no in-memory bridge index was provided"
+        if self.bridge_index_loaded:
+            prop_ids=set(self.prop_by_id)
+            invalid=[pid for pid in self.prop_to_mentioned_titles if pid not in prop_ids]
+            if invalid:
+                self.bridge_index_loaded=False
+                self.bridge_index_warning=f"Bridge prop_id mismatch: first_invalid={invalid[:5]}"
 
     def _add_candidate(self, merged: Dict[Tuple[str, str], Dict[str, Any]], cand: Dict[str, Any], component: str, score: float) -> None:
         key = (cand["unit"], cand["id"])
@@ -276,6 +344,7 @@ class QueryMedoidRetriever:
         refine_cfg = self.cfg.get("refine", {})
         per_entity_props = int(refine_cfg.get("per_entity_propositions", 4)); per_entity_chunks = int(refine_cfg.get("per_entity_chunks", 2)); max_bundles = int(refine_cfg.get("max_bundles", 6))
         q_toks = tokenize(question); bundles: List[Dict[str, Any]] = []; seen_titles = set()
+        candidate_scores={(str(c.get("unit")),str(c.get("id"))):float(c.get("score",0.0)) for c in candidates}
         for s in seeds:
             title = str(s.get("title", ""))
             if not title or title in seen_titles: continue
@@ -296,7 +365,9 @@ class QueryMedoidRetriever:
                     if len(selected_chunks) >= per_entity_chunks: break
             path = [{"type":"query","id":"q","text":question},{"type":"entity","id":title,"text":title}] + [{"type":"proposition","id":p["prop_id"],"text":p["text"]} for p in selected_props]
             score = float(s.get("score", 0.0)) + sum(jaccard(q_toks, tokenize(p.get("text", ""))) for p in selected_props)
-            bundles.append({"bundle_id":f"b{len(bundles)}","anchor_title":title,"seed":dict(s),"propositions":[dict(p) for p in selected_props],"source_chunks":[dict(c) for c in selected_chunks],"evidence_path":path,"score":round(score,6),"diagnostics":{"num_props":len(selected_props),"num_chunks":len(selected_chunks),"refinement":"same-title entity hub expansion"}})
+            bundle={"bundle_id":f"b{len(bundles)}","anchor_title":title,"seed":dict(s),"propositions":[dict(p) for p in selected_props],"source_chunks":[dict(c) for c in selected_chunks],"evidence_path":path,"score":round(score,6),"diagnostics":{"num_props":len(selected_props),"num_chunks":len(selected_chunks),"refinement":"same-title entity hub expansion"}}
+            self._apply_bridge_expansion(bundle, question, q_toks, selected_props, selected_chunks, candidate_scores)
+            bundles.append(bundle)
         for c in candidates:
             if len(bundles) >= max_bundles: break
             title = c.get("title", "")
@@ -304,9 +375,143 @@ class QueryMedoidRetriever:
             seen_titles.add(title)
             chunk = self.chunk_by_id.get(c.get("chunk_id")) if c.get("chunk_id") else None
             prop = self.prop_by_id.get(c.get("id")) if c.get("unit") == "proposition" else None
-            bundles.append({"bundle_id":f"b{len(bundles)}","anchor_title":title,"seed":dict(c),"propositions":[dict(prop)] if prop else [],"source_chunks":[dict(chunk)] if chunk else ([dict(c)] if c.get("unit") == "chunk" else []),"evidence_path":[{"type":"query","id":"q","text":question},{"type":"candidate","id":c.get("id"),"text":c.get("text","")}],"score":round(float(c.get("score",0.0)),6),"diagnostics":{"refinement":"direct-candidate bridge"}})
-        bundles.sort(key=lambda b: b["score"], reverse=True)
+            bprops=[dict(prop)] if prop else []
+            bchunks=[dict(chunk)] if chunk else ([dict(c)] if c.get("unit") == "chunk" else [])
+            bundle={"bundle_id":f"b{len(bundles)}","anchor_title":title,"seed":dict(c),"propositions":bprops,"source_chunks":bchunks,"evidence_path":[{"type":"query","id":"q","text":question},{"type":"candidate","id":c.get("id"),"text":c.get("text","")}],"score":round(float(c.get("score",0.0)),6),"diagnostics":{"refinement":"direct-candidate bridge"}}
+            self._apply_bridge_expansion(bundle, question, q_toks, bprops, bchunks, candidate_scores)
+            bundles.append(bundle)
+        bundles=self._order_bundles(question,bundles)
         return bundles[:max_bundles]
+
+    def _mention_rows_for_prop(self, prop_id: str, source_title: str) -> List[Mapping[str,Any]]:
+        if not self.bridge_enabled:
+            return []
+        max_mentions=int(self.bridge_cfg.get("max_mentions_per_prop",3))
+        skip_ambiguous=bool(self.bridge_cfg.get("skip_ambiguous_aliases",True))
+        remove_self=bool(self.bridge_cfg.get("remove_self_mentions",True))
+        rows=[]
+        raw_rows=list(self.title_mentions_by_prop.get(str(prop_id),[]))
+        if not raw_rows:
+            raw_rows=[
+                {"prop_id":str(prop_id),"source_title":source_title,"mentioned_title":title,"mention":title,"mention_norm":str(title).lower(),"ambiguous":False}
+                for title in self.prop_to_mentioned_titles.get(str(prop_id),[])
+            ]
+        for row in raw_rows[:max_mentions*4]:
+            if skip_ambiguous and row.get("ambiguous"):
+                continue
+            title=str(row.get("mentioned_title",""))
+            if remove_self and title==source_title:
+                continue
+            if not title:
+                continue
+            rows.append(row)
+            if len(rows)>=max_mentions:
+                break
+        return rows
+
+    def _bridge_source_props(self, base_props: Sequence[Mapping[str,Any]], anchor_title: str) -> List[Mapping[str,Any]]:
+        out=[]; seen=set()
+        for prop in base_props:
+            pid=str(prop.get("prop_id",""))
+            if pid:
+                seen.add(pid); out.append(prop)
+        max_scan=int(self.bridge_cfg.get("max_bridge_source_props_per_seed",16))
+        for prop in self.props_by_title.get(anchor_title,[])[:max_scan]:
+            pid=str(prop.get("prop_id",""))
+            if pid and pid not in seen and self.prop_to_mentioned_titles.get(pid):
+                seen.add(pid); out.append(prop)
+        return out
+
+    def _bridge_prop_score(self, prop: Mapping[str,Any], q_toks: Sequence[str], candidate_scores: Mapping[Tuple[str,str],float]) -> float:
+        pid=str(prop.get("prop_id",""))
+        return candidate_scores.get(("proposition",pid), jaccard(q_toks, tokenize(prop.get("text",""))))
+
+    def _apply_bridge_expansion(self, bundle: Dict[str,Any], question: str, q_toks: Sequence[str], base_props: Sequence[Mapping[str,Any]], base_chunks: Sequence[Mapping[str,Any]], candidate_scores: Mapping[Tuple[str,str],float]) -> None:
+        bundle.setdefault("bridge_titles",[])
+        bundle.setdefault("has_bridge",False)
+        bundle.setdefault("bridge_prop_count",0)
+        bundle.setdefault("chain_complete",False)
+        bundle.setdefault("ordering_group","same_title")
+        if not self.bridge_enabled or not base_props:
+            return
+        max_titles=int(self.bridge_cfg.get("max_bridge_titles_per_seed",2))
+        max_props=int(self.bridge_cfg.get("max_bridge_props_per_title",2))
+        anchor=str(bundle.get("anchor_title",""))
+        bridge_rows=[]; seen_titles=set()
+        for prop in self._bridge_source_props(base_props, anchor):
+            for row in self._mention_rows_for_prop(str(prop.get("prop_id","")), str(prop.get("title",""))):
+                title=str(row.get("mentioned_title",""))
+                if title in seen_titles:
+                    continue
+                seen_titles.add(title); bridge_rows.append((prop,row))
+                if len(bridge_rows)>=max_titles:
+                    break
+            if len(bridge_rows)>=max_titles:
+                break
+        if not bridge_rows:
+            return
+        existing_prop_ids={str(p.get("prop_id")) for p in bundle.get("propositions",[]) if p.get("prop_id")}
+        existing_chunk_ids={str(c.get("chunk_id")) for c in bundle.get("source_chunks",[]) if c.get("chunk_id")}
+        bridge_source_props=[]; bridge_props=[]; bridge_titles=[]; bridge_paths=[]
+        for source_prop,row in bridge_rows:
+            title=str(row.get("mentioned_title",""))
+            candidates=list(self.props_by_title.get(title,[]))
+            candidates.sort(key=lambda p:self._bridge_prop_score(p,q_toks,candidate_scores), reverse=True)
+            selected=[]
+            for prop in candidates:
+                pid=str(prop.get("prop_id",""))
+                if pid in existing_prop_ids:
+                    continue
+                selected.append(prop); existing_prop_ids.add(pid)
+                if len(selected)>=max_props:
+                    break
+            if not selected:
+                continue
+            source_pid=str(source_prop.get("prop_id",""))
+            if source_pid and source_pid not in existing_prop_ids:
+                bridge_source_props.append(dict(source_prop)); existing_prop_ids.add(source_pid)
+                source_cid=str(source_prop.get("chunk_id",""))
+                if source_cid and source_cid not in existing_chunk_ids and source_cid in self.chunk_by_id:
+                    bundle.setdefault("source_chunks",[]).append(dict(self.chunk_by_id[source_cid])); existing_chunk_ids.add(source_cid)
+            bridge_titles.append(title)
+            for prop in selected:
+                bridge_props.append(dict(prop))
+                cid=str(prop.get("chunk_id",""))
+                if cid and cid not in existing_chunk_ids and cid in self.chunk_by_id:
+                    bundle.setdefault("source_chunks",[]).append(dict(self.chunk_by_id[cid])); existing_chunk_ids.add(cid)
+                bridge_paths.append({"path_type":"mention_bridge","source_title":str(source_prop.get("title","")),"seed_prop":str(source_prop.get("text","")),"mention":row.get("mention"),"bridge_title":title,"bridge_prop":str(prop.get("text","")),"seed_prop_id":source_prop.get("prop_id"),"bridge_prop_id":prop.get("prop_id")})
+        if not bridge_props:
+            return
+        bundle["propositions"]=list(bundle.get("propositions",[]))+bridge_source_props+bridge_props
+        bundle["bridge_titles"]=bridge_titles
+        bundle["has_bridge"]=True
+        bundle["bridge_prop_count"]=len(bridge_props)
+        bundle["chain_complete"]=bool(base_props and bridge_titles and bridge_props)
+        bundle["ordering_group"]="complete_bridge_chain" if bundle["chain_complete"] else "bridge_candidate"
+        bundle["evidence_path"]=list(bundle.get("evidence_path",[]))+bridge_paths
+        bundle["score"]=round(float(bundle.get("score",0.0))+sum(self._bridge_prop_score(p,q_toks,candidate_scores) for p in bridge_props),6)
+        diag=dict(bundle.get("diagnostics",{}))
+        diag.update({"bridge_titles":len(bridge_titles),"bridge_prop_count":len(bridge_props),"refinement":"same-title + mention-bridge expansion"})
+        bundle["diagnostics"]=diag
+
+    def _exact_anchor_match(self, question: str, title: str) -> bool:
+        q=set(tokenize(question)); t=set(tokenize(title))
+        return bool(t and t.issubset(q))
+
+    def _order_bundles(self, question: str, bundles: Sequence[Dict[str,Any]]) -> List[Dict[str,Any]]:
+        ordering=str(self.bridge_cfg.get("ordering","chain_aware"))
+        if ordering!="chain_aware":
+            return sorted(bundles,key=lambda b:float(b.get("score",0.0)),reverse=True)
+        def key(b: Mapping[str,Any]):
+            cost=sum(token_count(c.get("text","")) for c in b.get("source_chunks",[]) or []) or sum(token_count(p.get("text","")) for p in b.get("propositions",[]) or [])
+            return (
+                1 if b.get("chain_complete") else 0,
+                1 if self._exact_anchor_match(question,str(b.get("anchor_title",""))) else 0,
+                1 if b.get("has_bridge") else 0,
+                float(b.get("score",0.0)),
+                -cost,
+            )
+        return sorted([dict(b) for b in bundles], key=key, reverse=True)
 
     def _budget_context(self, bundles: Sequence[Mapping[str, Any]]) -> Tuple[List[Dict[str, Any]], int]:
         budget = int(self.cfg.get("context_token_budget", self.cfg.get("refine", {}).get("context_token_budget", 3000)))

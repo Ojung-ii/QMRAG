@@ -1,16 +1,17 @@
 from __future__ import annotations
-import argparse, copy, json, shutil, time
+import argparse, copy, hashlib, json, shutil, time
 from pathlib import Path
 from typing import Any, Dict, Mapping
 from tabulate import tabulate
 from tqdm import tqdm
 from utils.data_loaders import load_dataset
 from utils.eval_metrics import evaluate_predictions, summary_markdown
-from utils.generation import DEFAULT_PROMPT_PROFILE, PROMPT_TEMPLATES, generate_answer
-from utils.indexing import LightweightEPCIndexer
+from utils.generation import DEFAULT_PROMPT_PROFILE, PROMPT_TEMPLATES, generate_answer, normalize_prediction_for_eval
+from utils.indexing import LightweightEPCIndexer, ensure_mention_bridge_index
 from utils.embedding import build_or_load_dense_indexes
 from utils.io_utils import ExperimentLogger, dump_json, dump_yaml, ensure_dir, load_yaml, now_timestamp, to_jsonable
 from utils.retrieval import QueryMedoidRetriever
+from utils.text import safe_truncate, token_count
 
 def parse_args():
     p=argparse.ArgumentParser(description="QMRAG: Query-conditioned Medoid RAG runner")
@@ -25,11 +26,15 @@ def parse_args():
 
 def apply_overrides(cfg: Dict[str,Any], args) -> Dict[str,Any]:
     cfg=copy.deepcopy(cfg)
+    gen_cfg=cfg.setdefault("generation",{})
+    prompt_profile=args.prompt_profile or gen_cfg.get("prompt_profile") or DEFAULT_PROMPT_PROFILE
+    if prompt_profile not in PROMPT_TEMPLATES:
+        raise ValueError(f"Unsupported prompt_profile={prompt_profile!r}; choices={sorted(PROMPT_TEMPLATES)}")
+    gen_cfg["prompt_profile"]=prompt_profile
     if args.output_root: cfg.setdefault("run",{})["output_root"]=args.output_root
-    if args.no_llm: cfg.setdefault("generation",{})["provider"]="none"
-    if args.vllm_base_url: cfg.setdefault("generation",{}).update({"provider":"vllm","base_url":args.vllm_base_url})
-    if args.vllm_model: cfg.setdefault("generation",{}).update({"provider":"vllm","model":args.vllm_model})
-    if args.prompt_profile: cfg.setdefault("generation",{})["prompt_profile"]=args.prompt_profile
+    if args.no_llm: gen_cfg["provider"]="none"
+    if args.vllm_base_url: gen_cfg.update({"provider":"vllm","base_url":args.vllm_base_url})
+    if args.vllm_model: gen_cfg.update({"provider":"vllm","model":args.vllm_model})
     if args.no_embed:
         cfg.setdefault("indexing",{}).setdefault("embedding",{})["enabled"]=False; cfg.setdefault("retrieval",{}).setdefault("dense",{})["enabled"]=False; cfg.setdefault("retrieval",{}).setdefault("embedding",{})["enabled"]=False
     if args.embedding_model_path:
@@ -109,9 +114,12 @@ def copy_index_tree(source: Path, target: Path, include_embeddings: bool=True) -
             shutil.copy2(child,dest)
 
 def build_or_load_index(dataset: str, docs, cfg: Mapping[str,Any], index_dir: Path, output_root: Path, logger: ExperimentLogger, force=False, rebuild_embeddings=False):
+    def ensure_bridge(idx: Dict[str,Any], path: Path, force_bridge: bool=False) -> Dict[str,Any]:
+        return ensure_mention_bridge_index(idx,path,cfg,logger,force=force_bridge)
     if not force and index_exists(index_dir):
         logger.log(f"Loading EPC index: {index_dir}")
         with logger.time_block("index.load", dataset=dataset): idx=LightweightEPCIndexer.load(index_dir)
+        idx=ensure_bridge(idx,index_dir)
         logger.log("Index meta: "+json.dumps(to_jsonable(idx.get("meta",{})),ensure_ascii=False)[:1500])
         return idx,index_dir,{"index_source":"current","index_dir":str(index_dir)}
     prefer_dense=bool(cfg.get("retrieval",{}).get("dense",{}).get("enabled",False)) and not rebuild_embeddings
@@ -122,22 +130,64 @@ def build_or_load_index(dataset: str, docs, cfg: Mapping[str,Any], index_dir: Pa
             with logger.time_block("index.reuse_latest", dataset=dataset, source=str(latest), target=str(index_dir), include_embeddings=False):
                 copy_index_tree(latest,index_dir,include_embeddings=False)
             with logger.time_block("index.load", dataset=dataset): idx=LightweightEPCIndexer.load(index_dir)
+            idx=ensure_bridge(idx,index_dir)
             logger.log("Index meta: "+json.dumps(to_jsonable(idx.get("meta",{})),ensure_ascii=False)[:1500])
             return idx,index_dir,{"index_source":"copied_latest","source_index_dir":str(latest),"index_dir":str(index_dir)}
         logger.log(f"Loading latest index for {dataset}: {latest}")
         with logger.time_block("index.load_latest", dataset=dataset, source=str(latest)): idx=LightweightEPCIndexer.load(latest)
+        idx=ensure_bridge(idx,latest)
         logger.log("Index meta: "+json.dumps(to_jsonable(idx.get("meta",{})),ensure_ascii=False)[:1500])
         return idx,latest,{"index_source":"latest","source_index_dir":str(latest),"index_dir":str(latest)}
     if force:
         logger.log(f"Reindex requested; building EPC index for {dataset}: docs={len(docs)} target={index_dir}")
     else:
         logger.log(f"No reusable EPC index found; building EPC index for {dataset}: docs={len(docs)} target={index_dir}")
-    with logger.time_block("index.build_epc", dataset=dataset, num_docs=len(docs)): idx=LightweightEPCIndexer(cfg.get("indexing",{}), logger).build(docs)
+    index_cfg={**dict(cfg.get("indexing",{}) or {}),"bridge":dict(cfg.get("retrieval",{}).get("bridge",{}) or {})}
+    with logger.time_block("index.build_epc", dataset=dataset, num_docs=len(docs)): idx=LightweightEPCIndexer(index_cfg, logger).build(docs)
     with logger.time_block("index.save_epc", dataset=dataset): LightweightEPCIndexer.save(idx,index_dir)
+    idx=ensure_bridge(idx,index_dir)
     logger.log("Index meta: "+json.dumps(to_jsonable(idx.get("meta",{})),ensure_ascii=False)[:1500])
     return idx,index_dir,{"index_source":"built","index_dir":str(index_dir)}
 
 def append_line(fh,row): fh.write(json.dumps(to_jsonable(row),ensure_ascii=False)+"\n"); fh.flush()
+
+def sha256_text(text: str) -> str:
+    return hashlib.sha256(str(text or "").encode("utf-8")).hexdigest()
+
+def add_generation_logging_fields(row: Dict[str,Any], gen: Mapping[str,Any], cfg: Mapping[str,Any]) -> Dict[str,Any]:
+    log_cfg=cfg.get("logging",{}) if cfg else {}
+    rendered_context=str(gen.get("rendered_context") or "")
+    prompt=str(gen.get("prompt") or "")
+    preview_chars=int(log_cfg.get("rendered_context_preview_chars",2000) or 2000)
+    row["rendered_context_tokens"]=token_count(rendered_context)
+    row["rendered_context_preview"]=safe_truncate(rendered_context, preview_chars)
+    row["rendered_context_hash"]=sha256_text(rendered_context)
+    row["prompt_hash"]=sha256_text(prompt)
+    if bool(log_cfg.get("save_rendered_context",False)):
+        row["rendered_context"]=rendered_context
+    if bool(log_cfg.get("save_full_prompt",False)):
+        row["prompt"]=prompt
+    return row
+
+def has_predictions(out_dir: Path) -> bool:
+    return (out_dir/"predictions.jsonl").exists() or (out_dir/"예측결과.jsonl").exists()
+
+def copy_compat_outputs(out_dir: Path, compat_dir: Path) -> None:
+    if out_dir.resolve()==compat_dir.resolve():
+        return
+    ensure_dir(compat_dir)
+    for name in ("config.yaml","predictions.jsonl","예측결과.jsonl","eval.json","eval_summary.md"):
+        src=out_dir/name
+        if src.exists():
+            shutil.copy2(src,compat_dir/name)
+
+def copy_compat_index(index_dir: Path, compat_dir: Path, logger: ExperimentLogger) -> None:
+    compat_index_dir=compat_dir/"index"
+    if index_dir.resolve()==compat_index_dir.resolve():
+        return
+    logger.log(f"Copying compatibility index artifacts: source={index_dir} target={compat_index_dir}")
+    with logger.time_block("index.copy_compat", source=str(index_dir), target=str(compat_index_dir)):
+        copy_index_tree(index_dir,compat_index_dir,include_embeddings=False)
 
 def result_prompt_profile(rows, fallback=None) -> str:
     for row in rows:
@@ -145,25 +195,56 @@ def result_prompt_profile(rows, fallback=None) -> str:
             return str(row["prompt_profile"])
     return str(fallback or DEFAULT_PROMPT_PROFILE)
 
-def eval_only(dataset: str, out_dir: Path, logger: ExperimentLogger, prompt_profile: str | None = None):
+def prompt_experiment_type(prompt_profile: str) -> str:
+    if prompt_profile=="common_qa":
+        return "main_comparison"
+    if prompt_profile=="qmrag_bundle_qa":
+        return "ablation"
+    return "unknown"
+
+def log_retrieval_summary(preds: list[Mapping[str,Any]], logger: ExperimentLogger) -> None:
+    if not preds:
+        return
+    def avg(key: str) -> float:
+        vals=[float((row.get("retrieval_diagnostics",{}) or {}).get(key,0.0) or 0.0) for row in preds]
+        return sum(vals)/max(1,len(vals))
+    summary={
+        "avg_bridge_title_count":round(avg("bridge_title_count"),6),
+        "avg_bridge_bundle_count":round(avg("bridge_bundle_count"),6),
+        "chain_complete_rate":round(sum(1.0 if (row.get("retrieval_diagnostics",{}) or {}).get("has_chain_complete") else 0.0 for row in preds)/max(1,len(preds)),6),
+        "retrieval_ms":round(avg("timings.total_retrieval_s"),6),
+        "context_tokens":round(avg("context_tokens"),6),
+    }
+    # timings are nested, compute total retrieval separately.
+    totals=[float(((row.get("retrieval_diagnostics",{}) or {}).get("timings",{}) or {}).get("total_retrieval_s",0.0) or 0.0)*1000.0 for row in preds]
+    summary["retrieval_ms"]=round(sum(totals)/max(1,len(totals)),6)
+    logger.log("Retrieval summary: "+json.dumps(summary,ensure_ascii=False))
+    logger.event({"event":"retrieval.summary",**summary})
+
+def eval_only(dataset: str, out_dir: Path, logger: ExperimentLogger, prompt_profile: str | None = None, compat_dir: Path | None = None):
     path=out_dir/"예측결과.jsonl" if (out_dir/"예측결과.jsonl").exists() else out_dir/"predictions.jsonl"
     rows=[json.loads(x) for x in path.read_text(encoding="utf-8").splitlines() if x.strip()]
     prompt_profile=result_prompt_profile(rows,prompt_profile)
     with logger.time_block("eval", dataset=dataset, n=len(rows)):
-        res=evaluate_predictions(rows); res["prompt_profile"]=prompt_profile; dump_json(res,out_dir/"eval.json"); (out_dir/"eval_summary.md").write_text(summary_markdown(dataset,res),encoding="utf-8")
+        res=evaluate_predictions(rows,dataset=dataset,prompt_profile=prompt_profile); dump_json(res,out_dir/"eval.json"); (out_dir/"eval_summary.md").write_text(summary_markdown(dataset,res),encoding="utf-8")
+    if compat_dir is not None:
+        copy_compat_outputs(out_dir,compat_dir)
     return {"dataset":dataset, **{k:v for k,v in res.items() if k!="per_example"}}
 
 def run_dataset(dataset: str, cfg: Dict[str,Any], args, timestamp: str):
     output_root=Path(cfg.get("run",{}).get("output_root","outputs"))
     index_target_dir=output_root/dataset/"indexing"/timestamp
     out_dir=ensure_dir(output_root/dataset/"eval"/timestamp)
+    compat_dir=output_root/timestamp/dataset
+    if args.mode=="eval" and not has_predictions(out_dir) and has_predictions(compat_dir):
+        out_dir=compat_dir
     logger=ExperimentLogger(out_dir, echo=bool(cfg.get("run",{}).get("echo_logs",True)))
     logger.log(f"Run dataset={dataset} mode={args.mode} timestamp={timestamp}")
     logger.log(f"Eval output: {out_dir}")
     logger.log(f"Index target: {index_target_dir}")
     dump_yaml(cfg,out_dir/"config.yaml")
     prompt_profile=str(cfg.get("generation",{}).get("prompt_profile") or DEFAULT_PROMPT_PROFILE)
-    if args.mode=="eval": return eval_only(dataset,out_dir,logger,prompt_profile)
+    if args.mode=="eval": return eval_only(dataset,out_dir,logger,prompt_profile,compat_dir)
     ds_cfg=cfg.get("datasets",{}).get(dataset)
     if not ds_cfg: raise ValueError(f"Dataset {dataset} not in config")
     with logger.time_block("data.load", dataset=dataset): qas,docs=load_dataset(dataset,ds_cfg,args.limit,args.corpus_limit)
@@ -181,12 +262,14 @@ def run_dataset(dataset: str, cfg: Dict[str,Any], args, timestamp: str):
                 copy_index_tree(index_dir,index_target_dir,include_embeddings=False)
             dump_yaml(cfg,index_target_dir/"config.yaml")
             with logger.time_block("index.load", dataset=dataset): idx=LightweightEPCIndexer.load(index_target_dir)
+            idx=ensure_mention_bridge_index(idx,index_target_dir,cfg,logger)
             index_info={**index_info,"index_source":"copied_latest_for_dense","source_index_dir":str(index_dir),"index_dir":str(index_target_dir)}
             index_dir=index_target_dir
         logger.log("Building/loading dense indexes")
         with logger.time_block("index.build_dense_indexes", dataset=dataset):
             dense_indexes=build_or_load_dense_indexes(idx,cfg.get("retrieval",{}),index_dir,logger,force=dense_force)
         logger.log(f"Dense indexes ready: units={list(dense_indexes.keys())}")
+    copy_compat_index(index_dir,compat_dir,logger)
     if args.mode=="index": return {"dataset":dataset,"n":0,"status":"indexed","prompt_profile":prompt_profile,"index_dir":str(index_dir),**index_info,"index_meta":idx.get("meta",{})}
     retriever=QueryMedoidRetriever(idx,cfg.get("retrieval",{}),dense_indexes,logger); preds=[]; pko=out_dir/"예측결과.jsonl"; pen=out_dir/"predictions.jsonl"
     for p in [pko,pen]:
@@ -198,16 +281,26 @@ def run_dataset(dataset: str, cfg: Dict[str,Any], args, timestamp: str):
                     with logger.time_block("retrieve.one", dataset=dataset, qid=qa.id): ret=retriever.retrieve(qa.question, qa.metadata)
                     t=time.perf_counter()
                     with logger.time_block("generate.one", dataset=dataset, qid=qa.id): gen=generate_answer(qa.question, ret["evidence_bundles"], cfg.get("generation",{}))
-                    row={"id":qa.id,"question":qa.question,"prediction":gen.get("prediction",""),"answers":qa.answers,"support_titles":qa.support_titles,"support_facts":qa.support_facts,"prompt_profile":gen.get("prompt_profile",prompt_profile),"evidence_bundles":ret["evidence_bundles"],"seeds":ret["seeds"],"retrieval_diagnostics":ret["diagnostics"],"generation_latency_s":round(time.perf_counter()-t,6),"llm_provider":gen.get("llm_provider"),"llm_model":gen.get("model"),"llm_usage":gen.get("usage")}
+                    raw_prediction=str(gen.get("raw_prediction",gen.get("prediction","")) or "")
+                    prediction=normalize_prediction_for_eval(gen.get("prediction",raw_prediction))
+                    generation_provider=gen.get("generation_provider") or gen.get("llm_provider") or cfg.get("generation",{}).get("provider")
+                    row_prompt_profile=str(gen.get("prompt_profile",prompt_profile))
+                    row={"dataset":dataset,"id":qa.id,"question":qa.question,"raw_prediction":raw_prediction,"prediction":prediction,"answers":qa.answers,"support_titles":qa.support_titles,"support_facts":qa.support_facts,"prompt_profile":row_prompt_profile,"prompt_experiment_type":prompt_experiment_type(row_prompt_profile),"generation_provider":generation_provider,"evidence_bundles":ret["evidence_bundles"],"seeds":ret["seeds"],"retrieval_diagnostics":ret["diagnostics"],"generation_latency_s":float(gen.get("generation_latency_s",round(time.perf_counter()-t,6)) or 0.0),"llm_provider":generation_provider,"llm_model":gen.get("model"),"llm_usage":gen.get("usage")}
+                    if gen.get("generation_error"): row["generation_error"]=gen.get("generation_error")
+                    row=add_generation_logging_fields(row,gen,cfg)
                 except Exception as e:
                     logger.event({"event":"example.error","dataset":dataset,"qid":qa.id,"error":repr(e)})
                     if not args.continue_on_error: raise
-                    row={"id":qa.id,"question":qa.question,"prediction":"","answers":qa.answers,"support_titles":qa.support_titles,"prompt_profile":prompt_profile,"error":repr(e),"evidence_bundles":[],"seeds":[],"retrieval_diagnostics":{"candidate_count":0,"seed_count":0,"bundle_count":0,"context_tokens":0,"timings":{}},"generation_latency_s":0.0,"llm_provider":cfg.get("generation",{}).get("provider")}
+                    generation_provider=cfg.get("generation",{}).get("provider")
+                    row={"dataset":dataset,"id":qa.id,"question":qa.question,"raw_prediction":"","prediction":"","answers":qa.answers,"support_titles":qa.support_titles,"prompt_profile":prompt_profile,"prompt_experiment_type":prompt_experiment_type(prompt_profile),"generation_provider":generation_provider,"error":repr(e),"evidence_bundles":[],"seeds":[],"retrieval_diagnostics":{"candidate_count":0,"seed_count":0,"bundle_count":0,"context_tokens":0,"timings":{}},"generation_latency_s":0.0,"llm_provider":generation_provider}
+                    row=add_generation_logging_fields(row,{"rendered_context":"","prompt":""},cfg)
                 preds.append(row); append_line(fko,row); append_line(fen,row)
     with logger.time_block("eval", dataset=dataset, n=len(preds)):
-        res=evaluate_predictions(preds); res["prompt_profile"]=prompt_profile; res["index_dir"]=str(index_dir); res["index_source"]=index_info.get("index_source")
+        log_retrieval_summary(preds,logger)
+        res=evaluate_predictions(preds,dataset=dataset,prompt_profile=prompt_profile); res["index_dir"]=str(index_dir); res["index_source"]=index_info.get("index_source"); res["bridge_config"]=dict(cfg.get("retrieval",{}).get("bridge",{}) or {})
         if index_info.get("source_index_dir"): res["source_index_dir"]=index_info.get("source_index_dir")
         dump_json(res,out_dir/"eval.json"); (out_dir/"eval_summary.md").write_text(summary_markdown(dataset,res),encoding="utf-8")
+    copy_compat_outputs(out_dir,compat_dir)
     return {"dataset":dataset, **{k:v for k,v in res.items() if k!="per_example"}}
 
 def main():

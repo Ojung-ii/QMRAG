@@ -6,6 +6,11 @@ run:
   echo_logs: true
   save_prompts: false
 
+logging:
+  save_rendered_context: true
+  save_full_prompt: false
+  rendered_context_preview_chars: 2000
+
 indexing:
   max_chunk_tokens: 240
   min_prop_tokens: 2
@@ -38,6 +43,16 @@ retrieval:
     enabled: false
     top_k: 0
     units: []
+  bridge:
+    enabled: true
+    max_mentions_per_prop: 3
+    max_bridge_titles_per_seed: 2
+    max_bridge_props_per_title: 2
+    skip_ambiguous_aliases: true
+    min_alias_tokens: 2
+    remove_self_mentions: true
+    ordering: chain_aware
+    use_automaton: true
   embedding:
     enabled: false
   refine:
@@ -48,6 +63,7 @@ retrieval:
 generation:
   provider: none
   max_context_chars: 12000
+  prompt_profile: common_qa
 
 eval:
   metrics: [em, f1, answer_contains, support_title_recall, context_tokens, latency_ms]

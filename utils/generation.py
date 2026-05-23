@@ -39,10 +39,39 @@ Context:
 Answer:""",
 }
 
+INSUFFICIENT_PHRASES = (
+    "insufficient information",
+    "cannot be determined",
+    "not provided in the context",
+    "not found in the context",
+)
+
+IDK_PHRASES = (
+    "i don't know",
+    "i do not know",
+)
+
 def build_context_text(bundles: Sequence[Mapping[str,Any]], max_chars: int=24000) -> str:
     parts=[]
-    for b in bundles:
-        parts.append(f"[Bundle {b.get('bundle_id')} | anchor={b.get('anchor_title')} | score={b.get('score')}]")
+    order_rank={"complete_bridge_chain":0,"exact_query_anchor":1,"bridge_candidate":2,"same_title":3,"fallback":4}
+    ordered=sorted(
+        list(bundles),
+        key=lambda b:(order_rank.get(str(b.get("ordering_group","same_title")),5), not bool(b.get("chain_complete")), -float(b.get("score",0.0) or 0.0)),
+    )
+    for i,b in enumerate(ordered, start=1):
+        bridge=", ".join(str(x) for x in b.get("bridge_titles",[]) or [])
+        parts.append(f"[Evidence Bundle {i} | chain_complete={bool(b.get('chain_complete'))} | anchor={b.get('anchor_title')} | score={b.get('score')}]")
+        parts.append(f"Anchor: {b.get('anchor_title')}")
+        if bridge:
+            parts.append(f"Bridge: {bridge}")
+        bridge_paths=[x for x in b.get("evidence_path",[]) or [] if isinstance(x,Mapping) and x.get("path_type")=="mention_bridge"]
+        if bridge_paths:
+            parts.append("Path:")
+            for path in bridge_paths[:3]:
+                if path.get("seed_prop"):
+                    parts.append(f"- {path.get('source_title')}: {path.get('seed_prop')}")
+                if path.get("bridge_prop"):
+                    parts.append(f"- {path.get('bridge_title')}: {path.get('bridge_prop')}")
         if b.get("propositions"):
             parts.append("Propositions:")
             for p in b.get("propositions",[]): parts.append(f"- ({p.get('prop_id')} | {p.get('title')}) {p.get('text')}")
@@ -58,11 +87,24 @@ def build_prompt(question: str, context: str, prompt_profile: str = DEFAULT_PROM
         raise ValueError(f"Unsupported prompt_profile={profile!r}; choices={sorted(PROMPT_TEMPLATES)}")
     return PROMPT_TEMPLATES[profile].format(question=question, context=context)
 
-def build_generation_prompt(question: str, bundles: Sequence[Mapping[str,Any]], cfg: Optional[Mapping[str,Any]]=None) -> tuple[str, str]:
+def is_insufficient_prediction(prediction: Any) -> bool:
+    text=str(prediction or "").lower()
+    return any(phrase in text for phrase in INSUFFICIENT_PHRASES)
+
+def has_idk_phrase(prediction: Any) -> bool:
+    text=str(prediction or "").lower()
+    return any(phrase in text for phrase in IDK_PHRASES)
+
+def normalize_prediction_for_eval(prediction: Any) -> str:
+    if prediction is None:
+        return ""
+    return str(prediction).strip()
+
+def build_generation_prompt(question: str, bundles: Sequence[Mapping[str,Any]], cfg: Optional[Mapping[str,Any]]=None) -> tuple[str, str, str]:
     cfg=cfg or {}
     prompt_profile=str(cfg.get("prompt_profile") or DEFAULT_PROMPT_PROFILE)
     context=build_context_text(bundles, int(cfg.get("max_context_chars",24000)))
-    return build_prompt(question, context, prompt_profile), prompt_profile
+    return build_prompt(question, context, prompt_profile), prompt_profile, context
 
 def extractive_fallback_answer(question: str, bundles: Sequence[Mapping[str,Any]]) -> str:
     cands=[]
@@ -102,18 +144,20 @@ def _generate_vllm(prompt: str, cfg: Mapping[str,Any]) -> Dict[str,Any]:
     if cfg.get("stop"): req["stop"]=cfg.get("stop")
     if cfg.get("extra_body"): req["extra_body"]=dict(cfg.get("extra_body") or {})
     resp=client.chat.completions.create(**req); pred=resp.choices[0].message.content or ""; usage=getattr(resp,"usage",None)
-    return {"prediction":pred.strip(),"llm_provider":"vllm","model":model,"base_url":base_url,"usage":usage.model_dump() if hasattr(usage,"model_dump") else {}}
+    return {"raw_prediction":pred,"prediction":normalize_prediction_for_eval(pred),"llm_provider":"vllm","generation_provider":"vllm","model":model,"base_url":base_url,"usage":usage.model_dump() if hasattr(usage,"model_dump") else {}}
 
 def generate_answer(question: str, bundles: Sequence[Mapping[str,Any]], cfg: Mapping[str,Any]) -> Dict[str,Any]:
-    provider=str(cfg.get("provider","none")).lower(); prompt,prompt_profile=build_generation_prompt(question,bundles,cfg)
-    if provider in {"none","extractive","fallback","no-llm"}: return {"prediction":extractive_fallback_answer(question,bundles),"prompt":prompt,"prompt_profile":prompt_profile,"llm_provider":"extractive_fallback"}
+    provider=str(cfg.get("provider","none")).lower(); prompt,prompt_profile,rendered_context=build_generation_prompt(question,bundles,cfg); t0=time.perf_counter()
+    if provider in {"none","extractive","fallback","no-llm"}:
+        raw_prediction=extractive_fallback_answer(question,bundles)
+        return {"raw_prediction":raw_prediction,"prediction":normalize_prediction_for_eval(raw_prediction),"rendered_context":rendered_context,"prompt":prompt,"prompt_profile":prompt_profile,"generation_latency_s":round(time.perf_counter()-t0,6),"llm_provider":"extractive_fallback","generation_provider":"extractive_fallback"}
     if provider=="vllm":
         last=None
         for attempt in range(int(cfg.get("retries",1))+1):
             try:
-                out=_generate_vllm(prompt,cfg); out["prompt"]=prompt if cfg.get("save_prompt",False) else None; out["prompt_profile"]=prompt_profile; return out
+                out=_generate_vllm(prompt,cfg); out["prompt"]=prompt; out["rendered_context"]=rendered_context; out["prompt_profile"]=prompt_profile; out["generation_latency_s"]=round(time.perf_counter()-t0,6); return out
             except Exception as e:
                 last=e
                 if attempt<int(cfg.get("retries",1)): time.sleep(float(cfg.get("retry_sleep_s",2.0)))
-        raise RuntimeError(f"vLLM generation failed: {last!r}")
+        return {"raw_prediction":"","prediction":"","rendered_context":rendered_context,"prompt":prompt,"prompt_profile":prompt_profile,"generation_latency_s":round(time.perf_counter()-t0,6),"llm_provider":"vllm","generation_provider":"vllm","generation_error":repr(last)}
     raise ValueError(f"Unsupported generation.provider={provider}")
