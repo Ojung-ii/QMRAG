@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import json
 import random
+import re
 import time
 from pathlib import Path
 from collections import Counter, defaultdict
@@ -17,6 +18,126 @@ except Exception:  # pragma: no cover
     DenseMatrixIndex = None
     build_embedder = None
 from .text import jaccard, token_count, tokenize
+
+
+RESIDUAL_STOPWORDS={
+    "a","an","the","is","are","was","were","be","been","being","am",
+    "do","does","did","of","for","to","in","on","at","by","with","from",
+    "and","or","as","that","this","these","those","it","its","his","her",
+    "their","there","one","which","who","whom","whose","what","than","then",
+    "also","into","about","between","among","under","over","after","before",
+}
+
+GENERIC_RELATION_TITLES={
+    "place of birth","place of origin","date of birth","date of death",
+    "occupation","country","county","city","prime minister","president",
+    "film","song","album",
+}
+
+ANSWER_SLOT_TERMS={
+    "when","date","year","time","where","place","location","birth","born",
+    "birthplace","die","died","death","dead","prime","minister","known",
+    "author","written","wrote","write",
+}
+
+TERM_VARIANTS={
+    "die":{"die","died","death","dead","deaths","d"},
+    "died":{"die","died","death","dead","deaths","d"},
+    "death":{"die","died","death","dead","deaths","d"},
+    "birth":{"birth","born","birthplace","birthplaces"},
+    "born":{"birth","born","birthplace","birthplaces"},
+    "birthplace":{"birth","born","birthplace","birthplaces"},
+    "place":{"place","location","located","where","born_in"},
+    "when":{"when","date","year","time","january","february","march","april","may","june","july","august","september","october","november","december"},
+    "date":{"when","date","year","time","january","february","march","april","may","june","july","august","september","october","november","december"},
+    "minister":{"minister","ministry"},
+    "prime":{"prime"},
+    "known":{"known","notable","famous","recognized","recognised"},
+    "performer":{"performer","singer","rapper","artist","vocalist"},
+}
+
+
+def _norm_token(token: str) -> str:
+    t=str(token or "").lower().strip()
+    if t.endswith("'s"):
+        t=t[:-2]
+    return t
+
+
+def _norm_tokens(text: Any) -> List[str]:
+    raw=str(text or "")
+    toks=[t for t in (_norm_token(x) for x in tokenize(raw)) if t]
+    if re.search(r"\bborn\s+(?:in|at)\b", raw, flags=re.I):
+        toks.append("born_in")
+    return toks
+
+
+def _term_variants(term: str) -> set[str]:
+    t=_norm_token(term)
+    return set(TERM_VARIANTS.get(t,{t}))
+
+
+def _residual_groups(terms: Sequence[str]) -> List[set[str]]:
+    groups=[]; seen=set()
+    for term in terms:
+        t=_norm_token(term)
+        if not t or t in seen:
+            continue
+        seen.add(t); groups.append(_term_variants(t))
+    return groups
+
+
+def _coverage_count(terms: Sequence[str], text: Any) -> int:
+    toks=set(_norm_tokens(text))
+    return sum(1 for group in _residual_groups(terms) if toks & group)
+
+
+def _lexical_bm25_score(terms: Sequence[str], text: Any, idf: Optional[Mapping[str,float]]=None, avgdl: float=20.0) -> float:
+    toks=_norm_tokens(text)
+    if not toks:
+        return 0.0
+    tf=Counter(toks); dl=len(toks); score=0.0; k1=1.2; b=0.75
+    for group in _residual_groups(terms):
+        freq=sum(tf.get(v,0) for v in group)
+        if freq<=0:
+            continue
+        term_idf=max((float(idf.get(v,1.0)) for v in group), default=1.0) if idf else 1.0
+        denom=freq+k1*(1-b+b*dl/max(1e-9,avgdl))
+        score+=term_idf*(freq*(k1+1))/max(1e-9,denom)
+    return float(score)
+
+
+def _bridge_rank_text(prop: Mapping[str,Any], prev_prop: Optional[Mapping[str,Any]]) -> str:
+    text=str(prop.get("text",""))
+    if not prev_prop:
+        return text
+    if str(prev_prop.get("chunk_id",""))!=str(prop.get("chunk_id","")):
+        return text
+    prev_text=str(prev_prop.get("text",""))
+    if re.search(r"\((?:d|b|c)\.\s*$", prev_text, flags=re.I):
+        return f"{prev_text} {text}".strip()
+    return text
+
+
+def build_residual_query(question: str, anchor_title: str, bridge_title: str, seed_prop_text: str) -> List[str]:
+    q_terms=_norm_tokens(question)
+    seed_toks=set(_norm_tokens(seed_prop_text))
+    remove=set(_norm_tokens(anchor_title)) | set(_norm_tokens(bridge_title))
+    for match in re.finditer(r"\b[A-Z][A-Za-z0-9'_-]+(?:\s+[A-Z][A-Za-z0-9'_-]+)+", str(seed_prop_text or "")):
+        phrase=" ".join(_norm_tokens(match.group(0)))
+        if phrase and phrase not in GENERIC_RELATION_TITLES:
+            remove.update(phrase.split())
+    terms=[]; seen=set()
+    for term in q_terms:
+        if term in RESIDUAL_STOPWORDS or term in remove or len(term)<=1:
+            continue
+        if term not in ANSWER_SLOT_TERMS and seed_toks & _term_variants(term):
+            continue
+        if term not in seen:
+            seen.add(term); terms.append(term)
+    if not terms:
+        terms=[t for t in q_terms if t not in RESIDUAL_STOPWORDS] or q_terms
+    return terms
 
 
 class BM25Index:
@@ -144,6 +265,10 @@ class QueryMedoidRetriever:
             dense_enabled=bool(self.dense_indexes) or self._dense_prop_matrix is not None or self._dense_chunk_matrix is not None,
         )
         bridge_titles={t for b in bundles for t in b.get("bridge_titles",[]) or []}
+        bridge_connected_count=sum(1 for b in bundles if b.get("bridge_connected"))
+        answer_slot_aligned_count=sum(1 for b in bundles if b.get("answer_slot_aligned"))
+        chain_complete_v2_count=sum(1 for b in bundles if b.get("chain_complete_v2"))
+        residual_counts=[float(b.get("residual_coverage_count",0.0) or 0.0) for b in bundles]
         diag_dict=diag.__dict__
         diag_dict.update({
             "bridge_enabled":self.bridge_enabled,
@@ -153,6 +278,14 @@ class QueryMedoidRetriever:
             "bridge_bundle_count":sum(1 for b in bundles if b.get("has_bridge")),
             "chain_complete_count":sum(1 for b in bundles if b.get("chain_complete")),
             "has_chain_complete":any(bool(b.get("chain_complete")) for b in bundles),
+            "bridge_connected_count":bridge_connected_count,
+            "answer_slot_aligned_count":answer_slot_aligned_count,
+            "chain_complete_v2_count":chain_complete_v2_count,
+            "chain_complete_v2_rate":chain_complete_v2_count/max(1,len(bundles)),
+            "avg_residual_coverage_count":sum(residual_counts)/max(1,len(residual_counts)),
+            "has_bridge_connected":bridge_connected_count>0,
+            "has_answer_slot_aligned":answer_slot_aligned_count>0,
+            "has_chain_complete_v2":chain_complete_v2_count>0,
         })
         return {"question": question, "candidates": candidates, "seeds": seeds, "evidence_bundles": bundles, "diagnostics": diag.__dict__}
 
@@ -375,7 +508,19 @@ class QueryMedoidRetriever:
             seen_titles.add(title)
             chunk = self.chunk_by_id.get(c.get("chunk_id")) if c.get("chunk_id") else None
             prop = self.prop_by_id.get(c.get("id")) if c.get("unit") == "proposition" else None
-            bprops=[dict(prop)] if prop else []
+            if prop:
+                bprops=[dict(prop)]
+            elif chunk and self._exact_anchor_match(question,str(title)) and not self._is_generic_relation_title(question,str(title)):
+                chunk_props=[
+                    self.prop_by_id[pid]
+                    for pid in chunk.get("proposition_ids",[]) or []
+                    if pid in self.prop_by_id
+                ]
+                chunk_props=[p for p in chunk_props if self.prop_to_mentioned_titles.get(str(p.get("prop_id",""))) or self.title_mentions_by_prop.get(str(p.get("prop_id","")))]
+                chunk_props.sort(key=lambda p: jaccard(q_toks, tokenize(p.get("text",""))), reverse=True)
+                bprops=[dict(p) for p in chunk_props[:max(1,min(2,per_entity_props))]]
+            else:
+                bprops=[]
             bchunks=[dict(chunk)] if chunk else ([dict(c)] if c.get("unit") == "chunk" else [])
             bundle={"bundle_id":f"b{len(bundles)}","anchor_title":title,"seed":dict(c),"propositions":bprops,"source_chunks":bchunks,"evidence_path":[{"type":"query","id":"q","text":question},{"type":"candidate","id":c.get("id"),"text":c.get("text","")}],"score":round(float(c.get("score",0.0)),6),"diagnostics":{"refinement":"direct-candidate bridge"}}
             self._apply_bridge_expansion(bundle, question, q_toks, bprops, bchunks, candidate_scores)
@@ -426,11 +571,90 @@ class QueryMedoidRetriever:
         pid=str(prop.get("prop_id",""))
         return candidate_scores.get(("proposition",pid), jaccard(q_toks, tokenize(prop.get("text",""))))
 
+    def _candidate_bridge_idf(self, candidates: Sequence[Mapping[str,Any]]) -> Dict[str,float]:
+        df: Counter[str]=Counter()
+        for prop in candidates:
+            df.update(set(_norm_tokens(prop.get("text",""))))
+        n=max(1,len(candidates))
+        return {term:math.log(1.0+(n-f+0.5)/(f+0.5)) for term,f in df.items()}
+
+    def _rank_bridge_props(self, candidates: Sequence[Mapping[str,Any]], residual_terms: Sequence[str], q_toks: Sequence[str]) -> List[Tuple[Mapping[str,Any],Dict[str,Any]]]:
+        if not candidates:
+            return []
+        idf=self._candidate_bridge_idf(candidates)
+        avgdl=sum(token_count(p.get("text","")) for p in candidates)/max(1,len(candidates))
+        ranked=[]
+        for idx,prop in enumerate(candidates):
+            text=prop.get("text","")
+            rank_text=_bridge_rank_text(prop, candidates[idx-1] if idx>0 else None)
+            coverage=_coverage_count(residual_terms,rank_text)
+            residual_score=_lexical_bm25_score(residual_terms,rank_text,idf,avgdl)
+            original_score=jaccard(q_toks,_norm_tokens(rank_text))
+            tok_count=int(prop.get("token_count",token_count(text)) or 0)
+            rank_key=(coverage>0,coverage,residual_score,original_score,-tok_count)
+            info={
+                "residual_coverage_count":coverage,
+                "residual_score":round(float(residual_score),6),
+                "original_relevance_score":round(float(original_score),6),
+                "token_count":tok_count,
+                "rank_key":rank_key,
+            }
+            if rank_text!=text:
+                info["display_text"]=rank_text
+            ranked.append((prop,info))
+        ranked.sort(key=lambda x:x[1]["rank_key"], reverse=True)
+        return ranked
+
+    def _is_generic_relation_title(self, question: str, title: str) -> bool:
+        if not bool(self.bridge_cfg.get("demote_generic_relation_titles",True)):
+            return False
+        norm_title=" ".join(_norm_tokens(title))
+        if not norm_title:
+            return False
+        if norm_title in GENERIC_RELATION_TITLES:
+            return True
+        q_norm=" ".join(_norm_tokens(question))
+        return norm_title in q_norm and any(phrase in norm_title for phrase in GENERIC_RELATION_TITLES)
+
+    def _finalize_bundle(self, question: str, bundle: Mapping[str,Any]) -> Dict[str,Any]:
+        b=dict(bundle)
+        is_generic=self._is_generic_relation_title(question,str(b.get("anchor_title","")))
+        exact=self._exact_anchor_match(question,str(b.get("anchor_title","")))
+        bridge_connected=bool(b.get("bridge_connected",b.get("has_bridge",False)))
+        aligned=bool(b.get("answer_slot_aligned",float(b.get("residual_coverage_count",0.0) or 0.0)>0.0))
+        chain_v2=bridge_connected and aligned
+        b["is_generic_relation_title"]=is_generic
+        b["exact_anchor_match"]=exact
+        b["bridge_connected"]=bridge_connected
+        b["answer_slot_aligned"]=aligned
+        b["chain_complete_v2"]=chain_v2
+        b["old_chain_complete"]=bool(b.get("old_chain_complete",b.get("chain_complete",False)))
+        b["chain_complete"]=chain_v2
+        if is_generic:
+            b["ordering_group"]="generic_relation"
+        elif chain_v2:
+            b["ordering_group"]="chain_complete_v2"
+        elif bridge_connected:
+            b["ordering_group"]="bridge_connected"
+        elif exact:
+            b["ordering_group"]="anchor"
+        elif b.get("propositions"):
+            b["ordering_group"]="same_title"
+        else:
+            b["ordering_group"]="fallback"
+        return b
+
     def _apply_bridge_expansion(self, bundle: Dict[str,Any], question: str, q_toks: Sequence[str], base_props: Sequence[Mapping[str,Any]], base_chunks: Sequence[Mapping[str,Any]], candidate_scores: Mapping[Tuple[str,str],float]) -> None:
         bundle.setdefault("bridge_titles",[])
         bundle.setdefault("has_bridge",False)
         bundle.setdefault("bridge_prop_count",0)
         bundle.setdefault("chain_complete",False)
+        bundle.setdefault("bridge_connected",False)
+        bundle.setdefault("answer_slot_aligned",False)
+        bundle.setdefault("chain_complete_v2",False)
+        bundle.setdefault("residual_coverage_count",0)
+        bundle.setdefault("residual_query","")
+        bundle.setdefault("residual_terms",[])
         bundle.setdefault("ordering_group","same_title")
         if not self.bridge_enabled or not base_props:
             return
@@ -452,21 +676,28 @@ class QueryMedoidRetriever:
             return
         existing_prop_ids={str(p.get("prop_id")) for p in bundle.get("propositions",[]) if p.get("prop_id")}
         existing_chunk_ids={str(c.get("chunk_id")) for c in bundle.get("source_chunks",[]) if c.get("chunk_id")}
-        bridge_source_props=[]; bridge_props=[]; bridge_titles=[]; bridge_paths=[]
+        bridge_source_props=[]; bridge_props=[]; bridge_titles=[]; bridge_paths=[]; residual_terms_all=[]; total_residual_coverage=0
         for source_prop,row in bridge_rows:
             title=str(row.get("mentioned_title",""))
+            residual_terms=build_residual_query(question, anchor, title, str(source_prop.get("text","")))
             candidates=list(self.props_by_title.get(title,[]))
-            candidates.sort(key=lambda p:self._bridge_prop_score(p,q_toks,candidate_scores), reverse=True)
+            ranked_candidates=self._rank_bridge_props(candidates,residual_terms,q_toks)
             selected=[]
-            for prop in candidates:
+            selected_info=[]
+            for prop,info in ranked_candidates:
                 pid=str(prop.get("prop_id",""))
                 if pid in existing_prop_ids:
                     continue
-                selected.append(prop); existing_prop_ids.add(pid)
+                selected.append(prop); selected_info.append(info); existing_prop_ids.add(pid)
                 if len(selected)>=max_props:
                     break
             if not selected:
                 continue
+            bridge_coverage=sum(int(info.get("residual_coverage_count",0) or 0) for info in selected_info)
+            total_residual_coverage+=bridge_coverage
+            for term in residual_terms:
+                if term not in residual_terms_all:
+                    residual_terms_all.append(term)
             source_pid=str(source_prop.get("prop_id",""))
             if source_pid and source_pid not in existing_prop_ids:
                 bridge_source_props.append(dict(source_prop)); existing_prop_ids.add(source_pid)
@@ -474,44 +705,74 @@ class QueryMedoidRetriever:
                 if source_cid and source_cid not in existing_chunk_ids and source_cid in self.chunk_by_id:
                     bundle.setdefault("source_chunks",[]).append(dict(self.chunk_by_id[source_cid])); existing_chunk_ids.add(source_cid)
             bridge_titles.append(title)
-            for prop in selected:
-                bridge_props.append(dict(prop))
+            for prop,info in zip(selected,selected_info):
+                prop_dict=dict(prop)
+                prop_dict["bridge_selection"]={k:v for k,v in info.items() if k!="rank_key"}
+                bridge_props.append(prop_dict)
                 cid=str(prop.get("chunk_id",""))
                 if cid and cid not in existing_chunk_ids and cid in self.chunk_by_id:
                     bundle.setdefault("source_chunks",[]).append(dict(self.chunk_by_id[cid])); existing_chunk_ids.add(cid)
-                bridge_paths.append({"path_type":"mention_bridge","source_title":str(source_prop.get("title","")),"seed_prop":str(source_prop.get("text","")),"mention":row.get("mention"),"bridge_title":title,"bridge_prop":str(prop.get("text","")),"seed_prop_id":source_prop.get("prop_id"),"bridge_prop_id":prop.get("prop_id")})
+                bridge_paths.append({"path_type":"mention_bridge","source_title":str(source_prop.get("title","")),"seed_prop":str(source_prop.get("text","")),"mention":row.get("mention"),"bridge_title":title,"bridge_prop":str(info.get("display_text") or prop.get("text","")),"seed_prop_id":source_prop.get("prop_id"),"bridge_prop_id":prop.get("prop_id"),"residual_query":" ".join(residual_terms),"residual_terms":residual_terms,"residual_coverage_count":info.get("residual_coverage_count",0),"residual_score":info.get("residual_score",0.0),"original_relevance_score":info.get("original_relevance_score",0.0)})
         if not bridge_props:
             return
+        bridge_connected=bool(base_props and bridge_titles and bridge_props)
+        answer_slot_aligned=total_residual_coverage>0
+        old_chain_complete=bridge_connected
         bundle["propositions"]=list(bundle.get("propositions",[]))+bridge_source_props+bridge_props
         bundle["bridge_titles"]=bridge_titles
         bundle["has_bridge"]=True
         bundle["bridge_prop_count"]=len(bridge_props)
-        bundle["chain_complete"]=bool(base_props and bridge_titles and bridge_props)
-        bundle["ordering_group"]="complete_bridge_chain" if bundle["chain_complete"] else "bridge_candidate"
+        bundle["bridge_connected"]=bridge_connected
+        bundle["residual_terms"]=residual_terms_all
+        bundle["residual_query"]=" ".join(residual_terms_all)
+        bundle["residual_coverage_count"]=total_residual_coverage
+        bundle["answer_slot_aligned"]=answer_slot_aligned
+        bundle["chain_complete_v2"]=bridge_connected and answer_slot_aligned
+        bundle["old_chain_complete"]=old_chain_complete
+        bundle["chain_complete"]=bundle["chain_complete_v2"]
+        bundle["ordering_group"]="chain_complete_v2" if bundle["chain_complete_v2"] else "bridge_connected"
         bundle["evidence_path"]=list(bundle.get("evidence_path",[]))+bridge_paths
         bundle["score"]=round(float(bundle.get("score",0.0))+sum(self._bridge_prop_score(p,q_toks,candidate_scores) for p in bridge_props),6)
         diag=dict(bundle.get("diagnostics",{}))
-        diag.update({"bridge_titles":len(bridge_titles),"bridge_prop_count":len(bridge_props),"refinement":"same-title + mention-bridge expansion"})
+        diag.update({"bridge_titles":len(bridge_titles),"bridge_prop_count":len(bridge_props),"bridge_connected":bridge_connected,"answer_slot_aligned":answer_slot_aligned,"chain_complete_v2":bundle["chain_complete_v2"],"residual_coverage_count":total_residual_coverage,"residual_query":bundle["residual_query"],"refinement":"same-title + mention-bridge residual expansion"})
         bundle["diagnostics"]=diag
 
     def _exact_anchor_match(self, question: str, title: str) -> bool:
-        q=set(tokenize(question)); t=set(tokenize(title))
+        q=set(_norm_tokens(question)); t=set(_norm_tokens(title))
         return bool(t and t.issubset(q))
 
     def _order_bundles(self, question: str, bundles: Sequence[Dict[str,Any]]) -> List[Dict[str,Any]]:
-        ordering=str(self.bridge_cfg.get("ordering","chain_aware"))
-        if ordering!="chain_aware":
-            return sorted(bundles,key=lambda b:float(b.get("score",0.0)),reverse=True)
+        ordering=str(self.bridge_cfg.get("ordering","chain_aware_v2"))
+        finalized=[self._finalize_bundle(question,b) for b in bundles]
+        if ordering not in {"chain_aware","chain_aware_v2"}:
+            return sorted(finalized,key=lambda b:float(b.get("score",0.0)),reverse=True)
         def key(b: Mapping[str,Any]):
             cost=sum(token_count(c.get("text","")) for c in b.get("source_chunks",[]) or []) or sum(token_count(p.get("text","")) for p in b.get("propositions",[]) or [])
+            is_generic=bool(b.get("is_generic_relation_title"))
+            exact=bool(b.get("exact_anchor_match"))
+            bridge_connected=bool(b.get("bridge_connected"))
+            chain_v2=bool(b.get("chain_complete_v2"))
+            if chain_v2 and not is_generic:
+                priority=0
+            elif bridge_connected and exact and not is_generic:
+                priority=1
+            elif exact and not is_generic:
+                priority=2
+            elif bridge_connected and not is_generic:
+                priority=3
+            elif b.get("propositions") and not is_generic:
+                priority=4
+            elif is_generic:
+                priority=5
+            else:
+                priority=6
             return (
-                1 if b.get("chain_complete") else 0,
-                1 if self._exact_anchor_match(question,str(b.get("anchor_title",""))) else 0,
-                1 if b.get("has_bridge") else 0,
+                -priority,
+                float(b.get("residual_coverage_count",0.0) or 0.0),
                 float(b.get("score",0.0)),
                 -cost,
             )
-        return sorted([dict(b) for b in bundles], key=key, reverse=True)
+        return sorted(finalized, key=key, reverse=True)
 
     def _budget_context(self, bundles: Sequence[Mapping[str, Any]]) -> Tuple[List[Dict[str, Any]], int]:
         budget = int(self.cfg.get("context_token_budget", self.cfg.get("refine", {}).get("context_token_budget", 3000)))

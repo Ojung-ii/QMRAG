@@ -53,28 +53,45 @@ IDK_PHRASES = (
 
 def build_context_text(bundles: Sequence[Mapping[str,Any]], max_chars: int=24000) -> str:
     parts=[]
-    order_rank={"complete_bridge_chain":0,"exact_query_anchor":1,"bridge_candidate":2,"same_title":3,"fallback":4}
+    order_rank={"chain_complete_v2":0,"bridge_connected":1,"anchor":2,"same_title":3,"generic_relation":4,"fallback":5,"complete_bridge_chain":0,"exact_query_anchor":2,"bridge_candidate":1}
     ordered=sorted(
-        list(bundles),
-        key=lambda b:(order_rank.get(str(b.get("ordering_group","same_title")),5), not bool(b.get("chain_complete")), -float(b.get("score",0.0) or 0.0)),
+        list(enumerate(bundles)),
+        key=lambda item:(
+            order_rank.get(str(item[1].get("ordering_group","same_title")),6),
+            not bool(item[1].get("chain_complete_v2",item[1].get("chain_complete"))),
+            bool(item[1].get("is_generic_relation_title")),
+            not bool(item[1].get("exact_anchor_match")),
+            -float(item[1].get("residual_coverage_count",0.0) or 0.0),
+            -float(item[1].get("score",0.0) or 0.0),
+            item[0],
+        ),
     )
-    for i,b in enumerate(ordered, start=1):
+    for i,(_,b) in enumerate(ordered, start=1):
         bridge=", ".join(str(x) for x in b.get("bridge_titles",[]) or [])
-        parts.append(f"[Evidence Bundle {i} | chain_complete={bool(b.get('chain_complete'))} | anchor={b.get('anchor_title')} | score={b.get('score')}]")
+        parts.append(f"[Evidence Bundle {i} | chain_complete_v2={bool(b.get('chain_complete_v2',b.get('chain_complete')))} | anchor={b.get('anchor_title')} | score={b.get('score')}]")
         parts.append(f"Anchor: {b.get('anchor_title')}")
         if bridge:
             parts.append(f"Bridge: {bridge}")
         bridge_paths=[x for x in b.get("evidence_path",[]) or [] if isinstance(x,Mapping) and x.get("path_type")=="mention_bridge"]
+        chain_texts=set()
         if bridge_paths:
-            parts.append("Path:")
-            for path in bridge_paths[:3]:
-                if path.get("seed_prop"):
-                    parts.append(f"- {path.get('source_title')}: {path.get('seed_prop')}")
-                if path.get("bridge_prop"):
-                    parts.append(f"- {path.get('bridge_title')}: {path.get('bridge_prop')}")
+            parts.append("Chain:")
+            for path in bridge_paths[:4]:
+                for title_key,text_key in (("source_title","seed_prop"),("bridge_title","bridge_prop")):
+                    text=str(path.get(text_key) or "")
+                    if text and not any(text==seen or text in seen for seen in chain_texts):
+                        chain_texts.add(text)
+                        parts.append(f"- {path.get(title_key)}: {text}")
         if b.get("propositions"):
-            parts.append("Propositions:")
-            for p in b.get("propositions",[]): parts.append(f"- ({p.get('prop_id')} | {p.get('title')}) {p.get('text')}")
+            prop_lines=[]
+            for p in b.get("propositions",[]):
+                text=str(p.get("text") or "")
+                if text and any(text==seen or text in seen for seen in chain_texts):
+                    continue
+                prop_lines.append(f"- ({p.get('prop_id')} | {p.get('title')}) {text}")
+            if prop_lines:
+                parts.append("Supporting Propositions:")
+                parts.extend(prop_lines)
         if b.get("source_chunks"):
             parts.append("Sources:")
             for c in b.get("source_chunks",[]): parts.append(f"- [{c.get('title')} | {c.get('chunk_id')}] {c.get('text')}")

@@ -103,7 +103,18 @@ def main() -> None:
         print(f"prediction: {row.get('prediction','')}")
         print(f"evidence titles: {', '.join(evidence_titles(row)[:20])}")
         for j,bundle in enumerate((row.get("evidence_bundles",[]) or [])[:3], start=1):
-            print(f"bundle {j}: anchor={bundle.get('anchor_title')} bridge_titles={bundle.get('bridge_titles',[])} chain_complete={bundle.get('chain_complete')}")
+            print(
+                f"bundle {j}: anchor={bundle.get('anchor_title')} "
+                f"bridge_titles={bundle.get('bridge_titles',[])} "
+                f"bridge_connected={bundle.get('bridge_connected')} "
+                f"answer_slot_aligned={bundle.get('answer_slot_aligned')} "
+                f"chain_complete_v2={bundle.get('chain_complete_v2')} "
+                f"residual_coverage_count={bundle.get('residual_coverage_count')} "
+                f"is_generic_relation_title={bundle.get('is_generic_relation_title')} "
+                f"ordering_group={bundle.get('ordering_group')}"
+            )
+            if bundle.get("residual_query"):
+                print(f"residual_query: {bundle.get('residual_query')}")
             if bundle.get("evidence_path"):
                 print(f"evidence_path: {bundle.get('evidence_path')}")
         preview=row.get("rendered_context_preview")

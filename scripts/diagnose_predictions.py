@@ -68,6 +68,10 @@ def summarize(path: Path) -> Dict[str, Any]:
         "answer_in_rendered_context": result.get("answer_in_rendered_context", 0.0),
         "answer_in_prediction": result.get("answer_in_prediction", 0.0),
         "chain_complete_rate": result.get("chain_complete_rate", 0.0),
+        "bridge_connected_rate": result.get("bridge_connected_rate", 0.0),
+        "answer_slot_aligned_rate": result.get("answer_slot_aligned_rate", 0.0),
+        "chain_complete_v2_rate": result.get("chain_complete_v2_rate", 0.0),
+        "avg_residual_coverage_count": result.get("avg_residual_coverage_count", 0.0),
         "avg_bridge_title_count": result.get("avg_bridge_title_count", 0.0),
         "avg_bridge_bundle_count": result.get("avg_bridge_bundle_count", 0.0),
         "idk_rate": result.get("idk_rate", 0.0),
@@ -88,7 +92,7 @@ def latest_by_dataset_prompt(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]
 
 
 def markdown_table(rows: List[Dict[str, Any]]) -> str:
-    headers=["dataset","prompt_profile","prompt_experiment_type","n","chain_complete_rate","avg_bridge_title_count","avg_bridge_bundle_count","answer_in_evidence_bundles","answer_in_rendered_context","answer_in_prediction","idk_rate","insufficient_rate","raw_none_rate","path"]
+    headers=["dataset","prompt_profile","prompt_experiment_type","n","bridge_connected_rate","answer_slot_aligned_rate","chain_complete_v2_rate","avg_residual_coverage_count","chain_complete_rate","avg_bridge_title_count","avg_bridge_bundle_count","answer_in_evidence_bundles","answer_in_rendered_context","answer_in_prediction","idk_rate","insufficient_rate","raw_none_rate","path"]
     lines=["| "+" | ".join(headers)+" |","| "+" | ".join(["---"]*len(headers))+" |"]
     for row in rows:
         lines.append(
@@ -98,6 +102,10 @@ def markdown_table(rows: List[Dict[str, Any]]) -> str:
                 str(row["prompt_profile"]),
                 str(row["prompt_experiment_type"]),
                 str(row["n"]),
+                f"{float(row['bridge_connected_rate']):.4f}",
+                f"{float(row['answer_slot_aligned_rate']):.4f}",
+                f"{float(row['chain_complete_v2_rate']):.4f}",
+                f"{float(row['avg_residual_coverage_count']):.2f}",
                 f"{float(row['chain_complete_rate']):.4f}",
                 f"{float(row['avg_bridge_title_count']):.2f}",
                 f"{float(row['avg_bridge_bundle_count']):.2f}",

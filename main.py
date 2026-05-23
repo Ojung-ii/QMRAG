@@ -211,6 +211,10 @@ def log_retrieval_summary(preds: list[Mapping[str,Any]], logger: ExperimentLogge
     summary={
         "avg_bridge_title_count":round(avg("bridge_title_count"),6),
         "avg_bridge_bundle_count":round(avg("bridge_bundle_count"),6),
+        "bridge_connected_rate":round(sum(1.0 if (row.get("retrieval_diagnostics",{}) or {}).get("has_bridge_connected") else 0.0 for row in preds)/max(1,len(preds)),6),
+        "answer_slot_aligned_rate":round(sum(1.0 if (row.get("retrieval_diagnostics",{}) or {}).get("has_answer_slot_aligned") else 0.0 for row in preds)/max(1,len(preds)),6),
+        "chain_complete_v2_rate":round(sum(1.0 if (row.get("retrieval_diagnostics",{}) or {}).get("has_chain_complete_v2") else 0.0 for row in preds)/max(1,len(preds)),6),
+        "avg_residual_coverage_count":round(avg("avg_residual_coverage_count"),6),
         "chain_complete_rate":round(sum(1.0 if (row.get("retrieval_diagnostics",{}) or {}).get("has_chain_complete") else 0.0 for row in preds)/max(1,len(preds)),6),
         "retrieval_ms":round(avg("timings.total_retrieval_s"),6),
         "context_tokens":round(avg("context_tokens"),6),

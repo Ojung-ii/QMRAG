@@ -67,13 +67,15 @@ retrieval:
     units: [proposition, chunk]
   bridge:
     enabled: true
+    selection: residual_lexical
     max_mentions_per_prop: 3
     max_bridge_titles_per_seed: 2
     max_bridge_props_per_title: 2
     skip_ambiguous_aliases: true
     min_alias_tokens: 2
     remove_self_mentions: true
-    ordering: chain_aware
+    ordering: chain_aware_v2
+    demote_generic_relation_titles: true
     use_automaton: true
   # main.py copies indexing.embedding into retrieval.embedding unless overridden.
   embedding: {}
