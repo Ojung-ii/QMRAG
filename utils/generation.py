@@ -21,11 +21,9 @@ Answer:""",
     "qmrag_bundle_qa": """You are a QA assistant for evidence-bundle based retrieval.
 Answer the question using only the provided Context.
 
-The Context may contain multiple Evidence Bundles.
-Each bundle may describe an entity, a bridge entity, or a source sentence.
-Some questions require combining two bundles:
-- one bundle identifies the relevant entity;
-- another bundle states the property, date, location, author, occupation, or description of that entity.
+The Context may contain Evidence Chain, Multi-Anchor Evidence, and Supporting Evidence sections.
+For Evidence Chain, answer using the bridge/property sentence when it completes the question.
+For Multi-Anchor Evidence, compare the listed anchors using only the provided evidence.
 
 Use only information explicitly supported by the Context.
 Return only the final short answer span.
@@ -53,12 +51,13 @@ IDK_PHRASES = (
 
 def build_context_text(bundles: Sequence[Mapping[str,Any]], max_chars: int=24000) -> str:
     parts=[]
-    order_rank={"chain_complete_v2":0,"bridge_connected":1,"anchor":2,"same_title":3,"generic_relation":4,"fallback":5,"complete_bridge_chain":0,"exact_query_anchor":2,"bridge_candidate":1}
+    order_rank={"anchor_connected_chain_complete":0,"multi_anchor":1,"anchor":2,"chain_complete_v2":3,"bridge_connected":4,"same_title":5,"generic_relation":6,"fallback":7,"complete_bridge_chain":3,"exact_query_anchor":2,"bridge_candidate":4}
     ordered=sorted(
         list(enumerate(bundles)),
         key=lambda item:(
-            order_rank.get(str(item[1].get("ordering_group","same_title")),6),
+            order_rank.get(str(item[1].get("ordering_group","same_title")),8),
             not bool(item[1].get("chain_complete_v2",item[1].get("chain_complete"))),
+            not bool(item[1].get("anchor_connected")),
             bool(item[1].get("is_generic_relation_title")),
             not bool(item[1].get("exact_anchor_match")),
             -float(item[1].get("residual_coverage_count",0.0) or 0.0),
@@ -68,13 +67,33 @@ def build_context_text(bundles: Sequence[Mapping[str,Any]], max_chars: int=24000
     )
     for i,(_,b) in enumerate(ordered, start=1):
         bridge=", ".join(str(x) for x in b.get("bridge_titles",[]) or [])
-        parts.append(f"[Evidence Bundle {i} | chain_complete_v2={bool(b.get('chain_complete_v2',b.get('chain_complete')))} | anchor={b.get('anchor_title')} | score={b.get('score')}]")
-        parts.append(f"Anchor: {b.get('anchor_title')}")
-        if bridge:
-            parts.append(f"Bridge: {bridge}")
+        bundle_type=str(b.get("bundle_type") or "")
         bridge_paths=[x for x in b.get("evidence_path",[]) or [] if isinstance(x,Mapping) and x.get("path_type")=="mention_bridge"]
         chain_texts=set()
+        if bundle_type=="multi_anchor":
+            anchors="; ".join(str(x) for x in b.get("anchor_titles",[]) or [])
+            parts.append(f"[Multi-Anchor Evidence {i} | anchors={anchors} | complete={bool(b.get('multi_anchor_complete'))}]")
+            seen=set()
+            for p in b.get("propositions",[]) or []:
+                title=str(p.get("title") or "")
+                text=str(p.get("text") or "")
+                key=(title,text)
+                if title and text and key not in seen:
+                    seen.add(key)
+                    parts.append(f"- {title}: {text}")
+            if not seen:
+                for c in b.get("source_chunks",[]) or []:
+                    title=str(c.get("title") or "")
+                    text=str(c.get("text") or "")
+                    if title and text:
+                        parts.append(f"- {title}: {text}")
+            parts.append("")
+            continue
         if bridge_paths:
+            parts.append(f"[Evidence Chain {i} | anchor_connected={bool(b.get('anchor_connected'))} | chain_complete_v2={bool(b.get('chain_complete_v2',b.get('chain_complete')))} | score={b.get('score')}]")
+            parts.append(f"Anchor: {b.get('anchor_title')}")
+            if bridge:
+                parts.append(f"Bridge: {bridge}")
             parts.append("Chain:")
             for path in bridge_paths[:4]:
                 for title_key,text_key in (("source_title","seed_prop"),("bridge_title","bridge_prop")):
@@ -82,6 +101,10 @@ def build_context_text(bundles: Sequence[Mapping[str,Any]], max_chars: int=24000
                     if text and not any(text==seen or text in seen for seen in chain_texts):
                         chain_texts.add(text)
                         parts.append(f"- {path.get(title_key)}: {text}")
+        else:
+            parts.append(f"[Supporting Evidence {i} | anchor={b.get('anchor_title')} | relation_title={bool(b.get('is_relation_title_bundle'))} | score={b.get('score')}]")
+            if b.get("anchor_title"):
+                parts.append(f"Anchor: {b.get('anchor_title')}")
         if b.get("propositions"):
             prop_lines=[]
             for p in b.get("propositions",[]):

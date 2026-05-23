@@ -52,7 +52,9 @@ retrieval:
     skip_ambiguous_aliases: true
     min_alias_tokens: 2
     remove_self_mentions: true
-    ordering: chain_aware_v2
+    ordering: anchor_chain_aware
+    anchor_constrained: true
+    multi_anchor_bundle: true
     demote_generic_relation_titles: true
     use_automaton: true
   embedding:

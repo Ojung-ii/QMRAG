@@ -101,14 +101,27 @@ def main() -> None:
         print(f"gold answers: {row.get('answers',[])}")
         print(f"raw_prediction: {row.get('raw_prediction','')}")
         print(f"prediction: {row.get('prediction','')}")
+        rd=row.get("retrieval_diagnostics",{}) or {}
+        if rd.get("query_anchor_titles") is not None:
+            print(f"query_anchor_titles: {rd.get('query_anchor_titles',[])}")
+            print(f"query_relation_titles: {rd.get('query_relation_titles',[])}")
         print(f"evidence titles: {', '.join(evidence_titles(row)[:20])}")
         for j,bundle in enumerate((row.get("evidence_bundles",[]) or [])[:3], start=1):
             print(
                 f"bundle {j}: anchor={bundle.get('anchor_title')} "
+                f"bundle_type={bundle.get('bundle_type')} "
                 f"bridge_titles={bundle.get('bridge_titles',[])} "
+                f"query_anchor_titles={bundle.get('query_anchor_titles',[])} "
+                f"query_relation_titles={bundle.get('query_relation_titles',[])} "
+                f"is_query_anchor_bundle={bundle.get('is_query_anchor_bundle')} "
+                f"is_relation_title_bundle={bundle.get('is_relation_title_bundle')} "
+                f"anchor_connected={bundle.get('anchor_connected')} "
+                f"anchor_connected_chain_complete={bundle.get('anchor_connected_chain_complete')} "
+                f"anchor_mismatch_chain={bundle.get('anchor_mismatch_chain')} "
                 f"bridge_connected={bundle.get('bridge_connected')} "
                 f"answer_slot_aligned={bundle.get('answer_slot_aligned')} "
                 f"chain_complete_v2={bundle.get('chain_complete_v2')} "
+                f"multi_anchor_complete={bundle.get('multi_anchor_complete')} "
                 f"residual_coverage_count={bundle.get('residual_coverage_count')} "
                 f"is_generic_relation_title={bundle.get('is_generic_relation_title')} "
                 f"ordering_group={bundle.get('ordering_group')}"

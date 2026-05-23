@@ -71,9 +71,16 @@ def summarize(path: Path) -> Dict[str, Any]:
         "bridge_connected_rate": result.get("bridge_connected_rate", 0.0),
         "answer_slot_aligned_rate": result.get("answer_slot_aligned_rate", 0.0),
         "chain_complete_v2_rate": result.get("chain_complete_v2_rate", 0.0),
+        "anchor_connected_chain_complete_rate": result.get("anchor_connected_chain_complete_rate", 0.0),
+        "anchor_mismatch_chain_rate": result.get("anchor_mismatch_chain_rate", 0.0),
+        "multi_anchor_bundle_rate": result.get("multi_anchor_bundle_rate", 0.0),
+        "generic_relation_top1_rate": result.get("generic_relation_top1_rate", 0.0),
+        "query_anchor_coverage_rate": result.get("query_anchor_coverage_rate", 0.0),
         "avg_residual_coverage_count": result.get("avg_residual_coverage_count", 0.0),
         "avg_bridge_title_count": result.get("avg_bridge_title_count", 0.0),
         "avg_bridge_bundle_count": result.get("avg_bridge_bundle_count", 0.0),
+        "CtxTok": result.get("context_tokens", 0.0),
+        "LatencyMs": result.get("latency_ms", 0.0),
         "idk_rate": result.get("idk_rate", 0.0),
         "insufficient_rate": result.get("insufficient_rate", 0.0),
         "raw_none_rate": raw_none/denom,
@@ -92,7 +99,7 @@ def latest_by_dataset_prompt(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]
 
 
 def markdown_table(rows: List[Dict[str, Any]]) -> str:
-    headers=["dataset","prompt_profile","prompt_experiment_type","n","bridge_connected_rate","answer_slot_aligned_rate","chain_complete_v2_rate","avg_residual_coverage_count","chain_complete_rate","avg_bridge_title_count","avg_bridge_bundle_count","answer_in_evidence_bundles","answer_in_rendered_context","answer_in_prediction","idk_rate","insufficient_rate","raw_none_rate","path"]
+    headers=["dataset","prompt_profile","prompt_experiment_type","n","bridge_connected_rate","answer_slot_aligned_rate","chain_complete_v2_rate","anchor_connected_chain_complete_rate","anchor_mismatch_chain_rate","multi_anchor_bundle_rate","generic_relation_top1_rate","query_anchor_coverage_rate","avg_residual_coverage_count","chain_complete_rate","avg_bridge_title_count","avg_bridge_bundle_count","answer_in_evidence_bundles","answer_in_rendered_context","answer_in_prediction","idk_rate","insufficient_rate","CtxTok","LatencyMs","raw_none_rate","path"]
     lines=["| "+" | ".join(headers)+" |","| "+" | ".join(["---"]*len(headers))+" |"]
     for row in rows:
         lines.append(
@@ -105,6 +112,11 @@ def markdown_table(rows: List[Dict[str, Any]]) -> str:
                 f"{float(row['bridge_connected_rate']):.4f}",
                 f"{float(row['answer_slot_aligned_rate']):.4f}",
                 f"{float(row['chain_complete_v2_rate']):.4f}",
+                f"{float(row['anchor_connected_chain_complete_rate']):.4f}",
+                f"{float(row['anchor_mismatch_chain_rate']):.4f}",
+                f"{float(row['multi_anchor_bundle_rate']):.4f}",
+                f"{float(row['generic_relation_top1_rate']):.4f}",
+                f"{float(row['query_anchor_coverage_rate']):.4f}",
                 f"{float(row['avg_residual_coverage_count']):.2f}",
                 f"{float(row['chain_complete_rate']):.4f}",
                 f"{float(row['avg_bridge_title_count']):.2f}",
@@ -114,6 +126,8 @@ def markdown_table(rows: List[Dict[str, Any]]) -> str:
                 f"{float(row['answer_in_prediction']):.4f}",
                 f"{float(row['idk_rate']):.4f}",
                 f"{float(row['insufficient_rate']):.4f}",
+                f"{float(row['CtxTok']):.1f}",
+                f"{float(row['LatencyMs']):.1f}",
                 f"{float(row['raw_none_rate']):.4f}",
                 str(row["path"]),
             ])
