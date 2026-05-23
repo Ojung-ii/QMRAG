@@ -1,0 +1,3 @@
+type: musique
+qa_path: data/musique/musique.json
+corpus_path: data/musique/musique_corpus.json

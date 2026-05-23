@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+.env
+
+# Local data and experiment artifacts
+/data/**/*.json
+/data/**/*.jsonl
+!/data/**/.gitkeep
+!/data/README.md
+outputs/*
+!outputs/.gitkeep
+cache/*
+!cache/.gitkeep
+
+# Index/vector artifacts
+*.npy
+*.faiss
+*.sqlite
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/

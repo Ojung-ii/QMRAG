@@ -1,0 +1,71 @@
+project:
+  name: QMRAG-smoke
+
+run:
+  output_root: outputs
+  echo_logs: true
+  save_prompts: false
+
+indexing:
+  max_chunk_tokens: 240
+  min_prop_tokens: 2
+  chunk_overlap_sentences: 0
+  show_progress: false
+  embedding:
+    enabled: false
+
+retrieval:
+  random_seed: 13
+  search_units: [proposition, chunk, entity]
+  candidate_top_k: 40
+  min_candidate_pool: 40
+  seed_count: 3
+  seed_trials: 3
+  sample_multiplier: 4
+  seed_pool_top_k: 40
+  diversity_weight: 0.35
+  context_token_budget: 2200
+  entity_anchor_score: 5.0
+  entity_anchor_prop_limit: 12
+  scan_titles_in_question: false
+  weights:
+    bm25: 0.90
+    dense: 0.0
+    entity: 0.10
+  bm25:
+    top_k: 40
+  dense:
+    enabled: false
+    top_k: 0
+    units: []
+  embedding:
+    enabled: false
+  refine:
+    per_entity_propositions: 4
+    per_entity_chunks: 2
+    max_bundles: 5
+
+generation:
+  provider: none
+  max_context_chars: 12000
+
+eval:
+  metrics: [em, f1, answer_contains, support_title_recall, context_tokens, latency_ms]
+
+datasets:
+  popqa:
+    type: popqa
+    qa_path: data/popqa/popqa.json
+    corpus_path: data/popqa/popqa_corpus.json
+  hotpotqa:
+    type: hotpotqa
+    qa_path: data/hotpotqa/hotpotqa.json
+    corpus_path: data/hotpotqa/hotpotqa_corpus.json
+  2wiki:
+    type: 2wiki
+    qa_path: data/2wiki/2wikimultihopqa.json
+    corpus_path: data/2wiki/2wikimultihopqa_corpus.json
+  musique:
+    type: musique
+    qa_path: data/musique/musique.json
+    corpus_path: data/musique/musique_corpus.json

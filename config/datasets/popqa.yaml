@@ -1,0 +1,3 @@
+type: popqa
+qa_path: data/popqa/popqa.json
+corpus_path: data/popqa/popqa_corpus.json

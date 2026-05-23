@@ -1,0 +1,3 @@
+# Install after PyTorch is installed in the QMRAG conda environment:
+#   MAX_JOBS=4 pip install flash-attn==2.2.0 --no-build-isolation
+flash-attn==2.2.0

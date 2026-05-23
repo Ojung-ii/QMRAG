@@ -1,0 +1,105 @@
+project:
+  name: QMRAG
+
+run:
+  output_root: outputs
+  echo_logs: true
+  save_prompts: false
+
+indexing:
+  # QMRAG keeps indexing cheap: title entity hub + sentence propositions + packed source chunks.
+  # Chunk is a source/provenance span. Retrieval primarily uses propositions.
+  max_chunk_tokens: 240
+  min_prop_tokens: 2
+  chunk_overlap_sentences: 0
+  show_progress: true
+  embedding:
+    enabled: true
+    provider: local_nvembed
+    backend: transformers
+    model_path: ${NVEMBED_MODEL_PATH:-/home/dilab/.cache/huggingface/models--nvidia--NV-Embed-v2/snapshots/3fa59658547db50a1e8e3346cf057fd0c77ed6ef/}
+    device: ${EMBED_DEVICE:-cuda}
+    device_map: null
+    batch_size: 32
+    normalize: true
+    trust_remote_code: true
+    local_files_only: true
+    max_seq_length: 32768
+    add_eos: true
+    query_instruction: "Given a question, retrieve passages that answer the question"
+    passage_instruction: ""
+    torch_dtype: float16
+    model_kwargs:
+      torch_dtype: float16
+    save_dtype: float16
+
+retrieval:
+  random_seed: 13
+  search_units: [proposition, chunk, entity]
+  candidate_top_k: 80
+  min_candidate_pool: 80
+  seed_count: 4
+  seed_trials: 7
+  sample_multiplier: 6
+  seed_pool_top_k: 80
+  diversity_weight: 0.35
+  context_token_budget: 3000
+  entity_anchor_score: 5.0
+  entity_anchor_prop_limit: 16
+  scan_titles_in_question: false
+  title_scan_limit: 50000
+  weights:
+    bm25: 0.35
+    dense: 0.55
+    entity: 0.10
+  bm25:
+    top_k: 80
+    k1: 1.5
+    b: 0.75
+  dense:
+    enabled: true
+    top_k: 80
+    units: [proposition, chunk]
+  # main.py copies indexing.embedding into retrieval.embedding unless overridden.
+  embedding: {}
+  refine:
+    per_entity_propositions: 4
+    per_entity_chunks: 2
+    max_bundles: 6
+
+generation:
+  provider: vllm
+  base_url: ${VLLM_BASE_URL:-http://127.0.0.1:8011/v1}
+  api_key: ${VLLM_API_KEY:-EMPTY}
+  model: ${VLLM_MODEL:-auto}
+  temperature: 0.0
+  top_p: 1.0
+  max_new_tokens: 64
+  timeout_s: 120
+  retries: 1
+  retry_sleep_s: 2.0
+  max_context_chars: 16000
+  prompt_profile: common_qa
+  system_message: ""
+
+eval:
+  metrics: [em, f1, answer_contains, support_title_recall, context_tokens, latency_ms]
+
+datasets:
+  popqa:
+    type: popqa
+    qa_path: data/popqa/popqa.json
+    corpus_path: data/popqa/popqa_corpus.json
+  hotpotqa:
+    type: hotpotqa
+    qa_path: data/hotpotqa/hotpotqa.json
+    corpus_path: data/hotpotqa/hotpotqa_corpus.json
+  2wiki:
+    type: 2wiki
+    qa_path: data/2wiki/2wikimultihopqa.json
+    corpus_path: data/2wiki/2wikimultihopqa_corpus.json
+  musique:
+    type: musique
+    qa_path: data/musique/musique.json
+    corpus_path: data/musique/musique_corpus.json
+

@@ -1,0 +1,18 @@
+# QMRAG runtime dependencies.
+# Create the conda env with scripts/create_qmrag_env.sh so PyTorch 2.2.0 + CUDA 12.1 is installed by conda.
+# NV-Embed-v2 compatibility pins are intentionally strict.
+numpy==1.26.4
+pyyaml==6.0.2
+tqdm==4.66.5
+tabulate==0.9.0
+psutil==5.9.8
+openai==1.45.0
+requests==2.32.3
+transformers==4.42.4
+sentence-transformers==2.7.0
+accelerate==0.30.1
+safetensors==0.4.5
+einops==0.8.0
+packaging==24.1
+ninja==1.11.1.1
+faiss-cpu==1.8.0.post1

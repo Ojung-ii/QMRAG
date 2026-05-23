@@ -1,0 +1,14 @@
+name: QMRAG
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - pytorch=2.2.0
+  - pytorch-cuda=12.1
+  - numpy<2
+  - pip:
+      - -r requirements.txt
