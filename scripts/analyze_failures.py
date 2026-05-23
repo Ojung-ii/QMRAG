@@ -64,6 +64,13 @@ def infer_prompt(rows: Sequence[Mapping[str, Any]], fallback: str | None = None)
     return str(fallback or "UNKNOWN")
 
 
+def infer_rendering(rows: Sequence[Mapping[str, Any]], fallback: str | None = None) -> str:
+    for row in rows:
+        if row.get("rendering_profile"):
+            return str(row["rendering_profile"])
+    return str(fallback or "structured_chain")
+
+
 def iter_prediction_files(output_root: Path) -> Iterable[Path]:
     for path in sorted(output_root.rglob("predictions.jsonl")):
         try:
@@ -79,10 +86,12 @@ def summarize_prediction_file(path: Path) -> dict[str, Any]:
     rows = read_jsonl(path)
     dataset = infer_dataset(path, rows)
     prompt = infer_prompt(rows)
+    rendering = infer_rendering(rows)
     return {
         "path": path,
         "dataset": dataset,
         "prompt_profile": prompt,
+        "rendering_profile": rendering,
         "n": len(rows),
         "mtime": path.stat().st_mtime,
     }
@@ -195,6 +204,7 @@ def classify_example(row: Mapping[str, Any]) -> dict[str, Any]:
         "id": row.get("id"),
         "dataset": row.get("dataset"),
         "prompt_profile": row.get("prompt_profile"),
+        "rendering_profile": row.get("rendering_profile", "structured_chain"),
         "question": row.get("question", ""),
         "answers": answers,
         "prediction": prediction,
@@ -222,11 +232,13 @@ def classify_example(row: Mapping[str, Any]) -> dict[str, Any]:
 
 def build_summary(examples: Sequence[Mapping[str, Any]], rows: Sequence[Mapping[str, Any]], dataset: str, prompt: str) -> dict[str, Any]:
     result = evaluate_predictions(rows, dataset=dataset, prompt_profile=prompt)
+    rendering = infer_rendering(rows)
     n = max(1, len(examples))
     counts = Counter(str(x["failure_category"]) for x in examples)
     summary = {
         "dataset": dataset,
         "prompt_profile": prompt,
+        "rendering_profile": rendering,
         "prompt_experiment_type": result.get("prompt_experiment_type", "unknown"),
         "n": len(examples),
         "EM": result.get("em", 0.0),
@@ -271,6 +283,7 @@ def markdown_summary(summary: Mapping[str, Any]) -> str:
         "",
         f"- dataset: {summary.get('dataset', 'UNKNOWN')}",
         f"- prompt_profile: {summary.get('prompt_profile', 'UNKNOWN')}",
+        f"- rendering_profile: {summary.get('rendering_profile', 'structured_chain')}",
         f"- prompt_experiment_type: {summary.get('prompt_experiment_type', 'unknown')}",
         "",
         "| metric | value |",
@@ -365,6 +378,7 @@ def write_csv(rows: Sequence[Mapping[str, Any]], path: Path) -> None:
         "id",
         "dataset",
         "prompt_profile",
+        "rendering_profile",
         "failure_category",
         "em",
         "f1",
@@ -400,12 +414,14 @@ def analyze_predictions(path: Path, analysis_dir: Path, sample: int) -> dict[str
     rows = read_jsonl(path)
     dataset = infer_dataset(path, rows)
     prompt = infer_prompt(rows)
+    rendering = infer_rendering(rows)
     for row in rows:
         row.setdefault("dataset", dataset)
         row.setdefault("prompt_profile", prompt)
+        row.setdefault("rendering_profile", rendering)
     examples = [classify_example(row) for row in rows]
     summary = build_summary(examples, rows, dataset, prompt)
-    stem = f"{dataset}_{prompt}"
+    stem = f"{dataset}_{prompt}_{rendering}"
     write_jsonl(examples, analysis_dir / f"{stem}_failure_examples.jsonl")
     write_csv(examples, analysis_dir / f"{stem}_failure_examples.csv")
     dump_json(summary, analysis_dir / f"{stem}_failure_summary.json")

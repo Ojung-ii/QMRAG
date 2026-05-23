@@ -6,7 +6,7 @@ from tabulate import tabulate
 from tqdm import tqdm
 from utils.data_loaders import load_dataset
 from utils.eval_metrics import evaluate_predictions, summary_markdown
-from utils.generation import DEFAULT_PROMPT_PROFILE, PROMPT_TEMPLATES, generate_answer, normalize_prediction_for_eval
+from utils.generation import DEFAULT_PROMPT_PROFILE, DEFAULT_RENDERING_PROFILE, PROMPT_TEMPLATES, RENDERING_PROFILES, generate_answer, normalize_prediction_for_eval
 from utils.indexing import LightweightEPCIndexer, ensure_mention_bridge_index
 from utils.embedding import build_or_load_dense_indexes
 from utils.io_utils import ExperimentLogger, dump_json, dump_yaml, ensure_dir, load_yaml, now_timestamp, to_jsonable
@@ -21,6 +21,7 @@ def parse_args():
     p.add_argument("--no-embed", "--no-embedding", action="store_true", dest="no_embed"); p.add_argument("--no-llm", action="store_true")
     p.add_argument("--vllm-base-url", default=None); p.add_argument("--vllm-model", default=None); p.add_argument("--embedding-model-path", default=None); p.add_argument("--embedding-device", default=None); p.add_argument("--embedding-batch-size", type=int, default=None)
     p.add_argument("--prompt-profile", choices=sorted(PROMPT_TEMPLATES), default=None)
+    p.add_argument("--rendering-profile", choices=sorted(RENDERING_PROFILES), default=None)
     p.add_argument("--continue-on-error", action="store_true")
     return p.parse_args()
 
@@ -31,6 +32,8 @@ def apply_overrides(cfg: Dict[str,Any], args) -> Dict[str,Any]:
     if prompt_profile not in PROMPT_TEMPLATES:
         raise ValueError(f"Unsupported prompt_profile={prompt_profile!r}; choices={sorted(PROMPT_TEMPLATES)}")
     gen_cfg["prompt_profile"]=prompt_profile
+    if args.rendering_profile:
+        gen_cfg["rendering_profile"]=args.rendering_profile
     if args.output_root: cfg.setdefault("run",{})["output_root"]=args.output_root
     if args.no_llm: gen_cfg["provider"]="none"
     if args.vllm_base_url: gen_cfg.update({"provider":"vllm","base_url":args.vllm_base_url})
@@ -195,7 +198,9 @@ def result_prompt_profile(rows, fallback=None) -> str:
             return str(row["prompt_profile"])
     return str(fallback or DEFAULT_PROMPT_PROFILE)
 
-def prompt_experiment_type(prompt_profile: str) -> str:
+def prompt_experiment_type(prompt_profile: str, rendering_profile: str | None = None) -> str:
+    if str(rendering_profile or DEFAULT_RENDERING_PROFILE) != DEFAULT_RENDERING_PROFILE:
+        return "rendering_ablation"
     if prompt_profile=="common_qa":
         return "main_comparison"
     if prompt_profile=="qmrag_bundle_qa":
@@ -253,6 +258,7 @@ def run_dataset(dataset: str, cfg: Dict[str,Any], args, timestamp: str):
     logger.log(f"Index target: {index_target_dir}")
     dump_yaml(cfg,out_dir/"config.yaml")
     prompt_profile=str(cfg.get("generation",{}).get("prompt_profile") or DEFAULT_PROMPT_PROFILE)
+    rendering_profile=str(cfg.get("generation",{}).get("rendering_profile") or DEFAULT_RENDERING_PROFILE)
     if args.mode=="eval": return eval_only(dataset,out_dir,logger,prompt_profile,compat_dir)
     ds_cfg=cfg.get("datasets",{}).get(dataset)
     if not ds_cfg: raise ValueError(f"Dataset {dataset} not in config")
@@ -279,7 +285,7 @@ def run_dataset(dataset: str, cfg: Dict[str,Any], args, timestamp: str):
             dense_indexes=build_or_load_dense_indexes(idx,cfg.get("retrieval",{}),index_dir,logger,force=dense_force)
         logger.log(f"Dense indexes ready: units={list(dense_indexes.keys())}")
     copy_compat_index(index_dir,compat_dir,logger)
-    if args.mode=="index": return {"dataset":dataset,"n":0,"status":"indexed","prompt_profile":prompt_profile,"index_dir":str(index_dir),**index_info,"index_meta":idx.get("meta",{})}
+    if args.mode=="index": return {"dataset":dataset,"n":0,"status":"indexed","prompt_profile":prompt_profile,"rendering_profile":rendering_profile,"index_dir":str(index_dir),**index_info,"index_meta":idx.get("meta",{})}
     retriever=QueryMedoidRetriever(idx,cfg.get("retrieval",{}),dense_indexes,logger); preds=[]; pko=out_dir/"예측결과.jsonl"; pen=out_dir/"predictions.jsonl"
     for p in [pko,pen]:
         if p.exists(): p.unlink()
@@ -294,14 +300,15 @@ def run_dataset(dataset: str, cfg: Dict[str,Any], args, timestamp: str):
                     prediction=normalize_prediction_for_eval(gen.get("prediction",raw_prediction))
                     generation_provider=gen.get("generation_provider") or gen.get("llm_provider") or cfg.get("generation",{}).get("provider")
                     row_prompt_profile=str(gen.get("prompt_profile",prompt_profile))
-                    row={"dataset":dataset,"id":qa.id,"question":qa.question,"raw_prediction":raw_prediction,"prediction":prediction,"answers":qa.answers,"support_titles":qa.support_titles,"support_facts":qa.support_facts,"prompt_profile":row_prompt_profile,"prompt_experiment_type":prompt_experiment_type(row_prompt_profile),"generation_provider":generation_provider,"evidence_bundles":ret["evidence_bundles"],"seeds":ret["seeds"],"retrieval_diagnostics":ret["diagnostics"],"generation_latency_s":float(gen.get("generation_latency_s",round(time.perf_counter()-t,6)) or 0.0),"llm_provider":generation_provider,"llm_model":gen.get("model"),"llm_usage":gen.get("usage")}
+                    row_rendering_profile=str(gen.get("rendering_profile",rendering_profile) or DEFAULT_RENDERING_PROFILE)
+                    row={"dataset":dataset,"id":qa.id,"question":qa.question,"raw_prediction":raw_prediction,"prediction":prediction,"answers":qa.answers,"support_titles":qa.support_titles,"support_facts":qa.support_facts,"prompt_profile":row_prompt_profile,"rendering_profile":row_rendering_profile,"prompt_experiment_type":prompt_experiment_type(row_prompt_profile,row_rendering_profile),"generation_provider":generation_provider,"evidence_bundles":ret["evidence_bundles"],"seeds":ret["seeds"],"retrieval_diagnostics":ret["diagnostics"],"generation_latency_s":float(gen.get("generation_latency_s",round(time.perf_counter()-t,6)) or 0.0),"llm_provider":generation_provider,"llm_model":gen.get("model"),"llm_usage":gen.get("usage")}
                     if gen.get("generation_error"): row["generation_error"]=gen.get("generation_error")
                     row=add_generation_logging_fields(row,gen,cfg)
                 except Exception as e:
                     logger.event({"event":"example.error","dataset":dataset,"qid":qa.id,"error":repr(e)})
                     if not args.continue_on_error: raise
                     generation_provider=cfg.get("generation",{}).get("provider")
-                    row={"dataset":dataset,"id":qa.id,"question":qa.question,"raw_prediction":"","prediction":"","answers":qa.answers,"support_titles":qa.support_titles,"prompt_profile":prompt_profile,"prompt_experiment_type":prompt_experiment_type(prompt_profile),"generation_provider":generation_provider,"error":repr(e),"evidence_bundles":[],"seeds":[],"retrieval_diagnostics":{"candidate_count":0,"seed_count":0,"bundle_count":0,"context_tokens":0,"timings":{}},"generation_latency_s":0.0,"llm_provider":generation_provider}
+                    row={"dataset":dataset,"id":qa.id,"question":qa.question,"raw_prediction":"","prediction":"","answers":qa.answers,"support_titles":qa.support_titles,"prompt_profile":prompt_profile,"rendering_profile":rendering_profile,"prompt_experiment_type":prompt_experiment_type(prompt_profile,rendering_profile),"generation_provider":generation_provider,"error":repr(e),"evidence_bundles":[],"seeds":[],"retrieval_diagnostics":{"candidate_count":0,"seed_count":0,"bundle_count":0,"context_tokens":0,"timings":{}},"generation_latency_s":0.0,"llm_provider":generation_provider}
                     row=add_generation_logging_fields(row,{"rendered_context":"","prompt":""},cfg)
                 preds.append(row); append_line(fko,row); append_line(fen,row)
     with logger.time_block("eval", dataset=dataset, n=len(preds)):

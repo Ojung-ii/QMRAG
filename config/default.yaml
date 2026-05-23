@@ -99,6 +99,7 @@ generation:
   retry_sleep_s: 2.0
   max_context_chars: 16000
   prompt_profile: common_qa
+  rendering_profile: structured_chain
   system_message: ""
 
 eval:

@@ -48,6 +48,14 @@ def infer_prompt(rows: Iterable[Dict[str, Any]]) -> str:
     return "UNKNOWN"
 
 
+def infer_rendering(rows: Iterable[Dict[str, Any]]) -> str:
+    for row in rows:
+        value=row.get("rendering_profile")
+        if value:
+            return str(value)
+    return "structured_chain"
+
+
 def iter_prediction_files(output_root: Path) -> Iterable[Path]:
     yield from sorted(output_root.rglob("predictions.jsonl"))
 
@@ -56,12 +64,14 @@ def summarize(path: Path) -> Dict[str, Any]:
     rows=read_jsonl(path)
     dataset=infer_dataset(path, rows)
     prompt_profile=infer_prompt(rows)
+    rendering_profile=infer_rendering(rows)
     result=evaluate_predictions(rows, dataset=dataset, prompt_profile=prompt_profile)
     raw_none=sum(1 for row in rows if row.get("raw_prediction") is None)
     denom=max(1,len(rows))
     return {
         "dataset": dataset,
         "prompt_profile": prompt_profile,
+        "rendering_profile": rendering_profile,
         "prompt_experiment_type": result.get("prompt_experiment_type", "unknown"),
         "n": result.get("n", 0),
         "answer_in_evidence_bundles": result.get("answer_in_evidence_bundles", result.get("answer_in_context", 0.0)),
@@ -90,16 +100,16 @@ def summarize(path: Path) -> Dict[str, Any]:
 
 
 def latest_by_dataset_prompt(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    latest: Dict[Tuple[str, str], Dict[str, Any]]={}
+    latest: Dict[Tuple[str, str, str], Dict[str, Any]]={}
     for row in rows:
-        key=(str(row["dataset"]), str(row["prompt_profile"]))
+        key=(str(row["dataset"]), str(row["prompt_profile"]), str(row["rendering_profile"]))
         if key not in latest or float(row["mtime"]) > float(latest[key]["mtime"]):
             latest[key]=row
-    return sorted(latest.values(), key=lambda r: (str(r["dataset"]), str(r["prompt_profile"])))
+    return sorted(latest.values(), key=lambda r: (str(r["dataset"]), str(r["prompt_profile"]), str(r["rendering_profile"])))
 
 
 def markdown_table(rows: List[Dict[str, Any]]) -> str:
-    headers=["dataset","prompt_profile","prompt_experiment_type","n","bridge_connected_rate","answer_slot_aligned_rate","chain_complete_v2_rate","anchor_connected_chain_complete_rate","anchor_mismatch_chain_rate","multi_anchor_bundle_rate","generic_relation_top1_rate","query_anchor_coverage_rate","avg_residual_coverage_count","chain_complete_rate","avg_bridge_title_count","avg_bridge_bundle_count","answer_in_evidence_bundles","answer_in_rendered_context","answer_in_prediction","idk_rate","insufficient_rate","CtxTok","LatencyMs","raw_none_rate","path"]
+    headers=["dataset","prompt_profile","rendering_profile","prompt_experiment_type","n","bridge_connected_rate","answer_slot_aligned_rate","chain_complete_v2_rate","anchor_connected_chain_complete_rate","anchor_mismatch_chain_rate","multi_anchor_bundle_rate","generic_relation_top1_rate","query_anchor_coverage_rate","avg_residual_coverage_count","chain_complete_rate","avg_bridge_title_count","avg_bridge_bundle_count","answer_in_evidence_bundles","answer_in_rendered_context","answer_in_prediction","idk_rate","insufficient_rate","CtxTok","LatencyMs","raw_none_rate","path"]
     lines=["| "+" | ".join(headers)+" |","| "+" | ".join(["---"]*len(headers))+" |"]
     for row in rows:
         lines.append(
@@ -107,6 +117,7 @@ def markdown_table(rows: List[Dict[str, Any]]) -> str:
             + " | ".join([
                 str(row["dataset"]),
                 str(row["prompt_profile"]),
+                str(row["rendering_profile"]),
                 str(row["prompt_experiment_type"]),
                 str(row["n"]),
                 f"{float(row['bridge_connected_rate']):.4f}",
@@ -156,7 +167,7 @@ def main() -> None:
     if args.latest:
         rows=latest_by_dataset_prompt(rows)
     else:
-        rows=sorted(rows, key=lambda r: (str(r["dataset"]), str(r["prompt_profile"]), str(r["path"])))
+        rows=sorted(rows, key=lambda r: (str(r["dataset"]), str(r["prompt_profile"]), str(r["rendering_profile"]), str(r["path"])))
     print(markdown_table(rows))
 
 

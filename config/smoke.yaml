@@ -68,6 +68,7 @@ generation:
   provider: none
   max_context_chars: 12000
   prompt_profile: common_qa
+  rendering_profile: structured_chain
 
 eval:
   metrics: [em, f1, answer_contains, support_title_recall, context_tokens, latency_ms]

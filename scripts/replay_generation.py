@@ -14,9 +14,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.analyze_failures import find_latest_prediction, infer_dataset, infer_prompt
+from scripts.analyze_failures import FAILURE_CATEGORIES, classify_example, find_latest_prediction, infer_dataset, infer_prompt, infer_rendering
 from utils.eval_metrics import evaluate_predictions, summary_markdown
-from utils.generation import PROMPT_TEMPLATES, build_prompt, normalize_prediction_for_eval
+from utils.generation import DEFAULT_RENDERING_PROFILE, PROMPT_TEMPLATES, RENDERING_PROFILES, build_prompt, normalize_prediction_for_eval, render_context
 from utils.io_utils import dump_json, load_yaml, read_jsonl, write_jsonl
 from utils.text import safe_truncate, token_count
 
@@ -36,10 +36,14 @@ def context_from_row(row: Mapping[str, Any]) -> str:
     return str(context or "")
 
 
-def prompt_experiment_type(prompt_profile: str) -> str:
-    if prompt_profile == "common_qa":
-        return "main_comparison"
-    if prompt_profile == "qmrag_bundle_qa":
+def json_hash(value: Any) -> str:
+    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def prompt_experiment_type(source_prompt: str, target_prompt: str, rendering_changed: bool) -> str:
+    if rendering_changed:
+        return "rendering_replay"
+    if target_prompt != source_prompt or target_prompt == "qmrag_bundle_qa":
         return "replay_ablation"
     return "replay"
 
@@ -98,16 +102,37 @@ def replay_rows(
     dataset: str,
     source_prompt: str,
     target_prompt: str,
+    source_rendering: str,
+    target_rendering: str,
+    rerender_context: bool,
     cfg: Mapping[str, Any],
     limit: int | None,
+    sample: int | None,
+    failure_category: str | None,
     no_llm: bool,
     dry_run: bool,
 ) -> list[dict[str, Any]]:
     out = []
-    selected = list(rows[:limit] if limit is not None else rows)
+    selected = list(rows)
+    if failure_category:
+        selected = [row for row in selected if classify_example(row)["failure_category"] == failure_category]
+    if sample is not None:
+        selected = selected[:sample]
+    if limit is not None:
+        selected = selected[:limit]
+    rendering_changed = rerender_context and (target_rendering != source_rendering or any(str(row.get("rendering_profile") or source_rendering) != target_rendering for row in selected))
     for row in selected:
-        context = context_from_row(row)
-        expected_hash = str(row.get("rendered_context_hash") or sha256_text(context))
+        source_context = context_from_row(row)
+        source_hash = str(row.get("rendered_context_hash") or sha256_text(source_context))
+        if rerender_context:
+            context = render_context(
+                row.get("evidence_bundles", []) or [],
+                rendering_profile=target_rendering,
+                max_chars=int(cfg.get("max_context_chars", 24000)),
+                token_budget=cfg.get("context_token_budget"),
+            )
+        else:
+            context = source_context
         actual_hash = sha256_text(context)
         prompt = build_prompt(str(row.get("question", "")), context, target_prompt)
         t0 = time.perf_counter()
@@ -127,8 +152,10 @@ def replay_rows(
             {
                 "dataset": dataset,
                 "source_prompt_profile": source_prompt,
+                "source_rendering_profile": str(row.get("rendering_profile") or source_rendering),
                 "prompt_profile": target_prompt,
-                "prompt_experiment_type": prompt_experiment_type(target_prompt),
+                "rendering_profile": target_rendering,
+                "prompt_experiment_type": prompt_experiment_type(source_prompt, target_prompt, rendering_changed),
                 "raw_prediction": str(gen.get("raw_prediction", "")),
                 "prediction": normalize_prediction_for_eval(gen.get("prediction", gen.get("raw_prediction", ""))),
                 "generation_provider": gen.get("generation_provider", "vllm"),
@@ -139,9 +166,12 @@ def replay_rows(
                 "rendered_context": context,
                 "rendered_context_preview": safe_truncate(context, 2000),
                 "rendered_context_hash": actual_hash,
-                "source_rendered_context_hash": expected_hash,
-                "rendered_context_hash_match": actual_hash == expected_hash,
+                "source_rendered_context_hash": source_hash,
+                "rendered_context_hash_match": actual_hash == source_hash,
                 "rendered_context_tokens": token_count(context),
+                "evidence_bundles_hash": json_hash(row.get("evidence_bundles", []) or []),
+                "source_evidence_bundles_hash": str(row.get("evidence_bundles_hash") or json_hash(row.get("evidence_bundles", []) or [])),
+                "evidence_bundles_hash_match": True,
                 "prompt_hash": sha256_text(prompt),
             }
         )
@@ -171,6 +201,9 @@ def main() -> None:
     parser.add_argument("--dataset", default=None)
     parser.add_argument("--source-prompt", default=None)
     parser.add_argument("--target-prompt", "--prompt-profile", dest="prompt_profile", default=None)
+    parser.add_argument("--rendering-profile", choices=sorted(RENDERING_PROFILES), default=None)
+    parser.add_argument("--failure-category", choices=FAILURE_CATEGORIES, default=None)
+    parser.add_argument("--sample", type=int, default=None)
     parser.add_argument("--latest", action="store_true")
     parser.add_argument("--output-root", default="outputs/replay")
     parser.add_argument("--search-output-root", default="outputs")
@@ -195,11 +228,26 @@ def main() -> None:
     rows = read_jsonl(pred_path)
     dataset = args.dataset or infer_dataset(pred_path, rows)
     source_prompt = args.source_prompt or infer_prompt(rows)
+    source_rendering = infer_rendering(rows)
+    target_rendering = str(args.rendering_profile or source_rendering or DEFAULT_RENDERING_PROFILE)
     cfg = load_generation_config(Path(args.config), args)
-    replayed = replay_rows(rows, dataset, source_prompt, target_prompt, cfg, args.limit, args.no_llm, args.dry_run)
+    cfg["rendering_profile"] = target_rendering
+    replayed = replay_rows(rows, dataset, source_prompt, target_prompt, source_rendering, target_rendering, bool(args.rendering_profile), cfg, args.limit, args.sample, args.failure_category, args.no_llm, args.dry_run)
+    expected_selected_count = len(rows)
+    if args.failure_category:
+        expected_selected_count = sum(1 for row in rows if classify_example(row)["failure_category"] == args.failure_category)
+    if args.sample is not None:
+        expected_selected_count = min(expected_selected_count, args.sample)
+    if args.limit is not None:
+        expected_selected_count = min(expected_selected_count, args.limit)
 
     timestamp = now_timestamp()
-    out_dir = Path(args.output_root) / timestamp / dataset / f"{source_prompt}_to_{target_prompt}"
+    suffix = f"{source_prompt}_to_{target_prompt}"
+    if target_rendering != source_rendering or args.rendering_profile:
+        suffix = f"{suffix}_{target_rendering}"
+    if args.failure_category:
+        suffix = f"{suffix}_{args.failure_category}"
+    out_dir = Path(args.output_root) / timestamp / dataset / suffix
     out_dir.mkdir(parents=True, exist_ok=True)
     pred_out = out_dir / "predictions.jsonl"
     write_jsonl(replayed, pred_out)
@@ -209,11 +257,19 @@ def main() -> None:
             "source_predictions": str(pred_path),
             "source_prompt_profile": source_prompt,
             "target_prompt_profile": target_prompt,
-            "prompt_experiment_type": "replay_ablation",
-            "row_count_matches_source": len(replayed) == (len(rows) if args.limit is None else min(len(rows), args.limit)),
-            "id_sequence_matches_source": [str(x.get("id")) for x in replayed]
+            "source_rendering_profile": source_rendering,
+            "rendering_profile": target_rendering,
+            "target_rendering_profile": target_rendering,
+            "failure_category": args.failure_category,
+            "prompt_experiment_type": prompt_experiment_type(source_prompt, target_prompt, bool(args.rendering_profile)),
+            "source_row_count": len(rows),
+            "selected_row_count": len(replayed),
+            "row_count_matches_selection": len(replayed) == expected_selected_count,
+            "id_sequence_matches_source_prefix": [str(x.get("id")) for x in replayed]
             == [str(x.get("id")) for x in rows[: len(replayed)]],
             "rendered_context_hash_match_rate": sum(1.0 if x.get("rendered_context_hash_match") else 0.0 for x in replayed)
+            / max(1, len(replayed)),
+            "evidence_bundles_hash_match_rate": sum(1.0 if x.get("evidence_bundles_hash_match") else 0.0 for x in replayed)
             / max(1, len(replayed)),
         }
     )
@@ -225,10 +281,13 @@ def main() -> None:
         json.dumps(
             {
                 "n": len(replayed),
-                "id_sequence_matches_source": result["id_sequence_matches_source"],
+                "id_sequence_matches_source_prefix": result["id_sequence_matches_source_prefix"],
                 "rendered_context_hash_match_rate": result["rendered_context_hash_match_rate"],
+                "evidence_bundles_hash_match_rate": result["evidence_bundles_hash_match_rate"],
                 "prompt_profile": target_prompt,
-                "prompt_experiment_type": "replay_ablation",
+                "rendering_profile": target_rendering,
+                "failure_category": args.failure_category,
+                "prompt_experiment_type": result["prompt_experiment_type"],
                 "no_llm": bool(args.no_llm or args.dry_run),
             },
             ensure_ascii=False,
