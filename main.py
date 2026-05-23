@@ -56,7 +56,13 @@ def as_index_dir(path: Path) -> Path | None:
         return nested
     return None
 
-def latest_dataset_index(dataset: str, output_root: Path, current_index_dir: Path) -> Path | None:
+def latest_dataset_index(
+    dataset: str,
+    output_root: Path,
+    current_index_dir: Path,
+    retrieval_cfg: Mapping[str,Any] | None = None,
+    prefer_dense: bool = False,
+) -> Path | None:
     candidates=[]; seen=set(); current_resolved=current_index_dir.resolve()
     search_paths=list((output_root/dataset/"indexing").glob("*"))
     search_paths.extend(output_root.glob(f"*/{dataset}/index"))
@@ -73,6 +79,10 @@ def latest_dataset_index(dataset: str, output_root: Path, current_index_dir: Pat
         seen.add(str(resolved)); candidates.append(index_dir)
     if not candidates:
         return None
+    if prefer_dense:
+        dense_candidates=[p for p in candidates if dense_indexes_ready(p,retrieval_cfg or {})]
+        if dense_candidates:
+            candidates=dense_candidates
     return max(candidates, key=lambda p: ((p/"index_meta.json").stat().st_mtime, str(p)))
 
 def dense_indexes_ready(index_dir: Path, retrieval_cfg: Mapping[str,Any]) -> bool:
@@ -104,7 +114,8 @@ def build_or_load_index(dataset: str, docs, cfg: Mapping[str,Any], index_dir: Pa
         with logger.time_block("index.load", dataset=dataset): idx=LightweightEPCIndexer.load(index_dir)
         logger.log("Index meta: "+json.dumps(to_jsonable(idx.get("meta",{})),ensure_ascii=False)[:1500])
         return idx,index_dir,{"index_source":"current","index_dir":str(index_dir)}
-    latest=None if force else latest_dataset_index(dataset,output_root,index_dir)
+    prefer_dense=bool(cfg.get("retrieval",{}).get("dense",{}).get("enabled",False)) and not rebuild_embeddings
+    latest=None if force else latest_dataset_index(dataset,output_root,index_dir,cfg.get("retrieval",{}),prefer_dense=prefer_dense)
     if latest is not None:
         if rebuild_embeddings:
             logger.log(f"Reusing latest EPC index for {dataset}: source={latest} target={index_dir} rebuild_embeddings=True")
