@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ "$#" -lt 2 ]]; then
-  echo "Usage: bash scripts/run_context_budget_ablation.sh <hotpotqa|2wiki|popqa|musique|all> <common_qa|qmrag_bundle_qa> [--limit N] [--include-raw-score]" >&2
+  echo "Usage: bash scripts/run_context_budget_ablation.sh <hotpotqa|2wiki|popqa|musique|all> <common_qa|qmrag_bundle_qa> [limit] [--limit N] [--include-raw-score]" >&2
   exit 2
 fi
 
@@ -12,6 +12,10 @@ shift 2
 
 LIMIT="1000"
 INCLUDE_RAW_SCORE="false"
+if [[ "$#" -gt 0 && "$1" != --* ]]; then
+  LIMIT="$1"
+  shift
+fi
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
     --limit)
@@ -49,12 +53,13 @@ latest_replay_path() {
   local dataset="$1"
   local prompt="$2"
   local mode="$3"
-  python - "$dataset" "$prompt" "$mode" <<'PY'
+  local ordering="$4"
+  python - "$dataset" "$prompt" "$mode" "$ordering" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-dataset, prompt, mode = sys.argv[1:4]
+dataset, prompt, mode, ordering = sys.argv[1:5]
 candidates = []
 for path in Path("outputs/replay").rglob("predictions.jsonl"):
     try:
@@ -64,6 +69,8 @@ for path in Path("outputs/replay").rglob("predictions.jsonl"):
     if first.get("dataset") != dataset or first.get("prompt_profile") != prompt:
         continue
     if not first.get("context_truncation_enabled"):
+        continue
+    if str(first.get("ordering_source") or "current") != ordering:
         continue
     if mode.startswith("top:"):
         if str(first.get("top_bundles")) != mode.split(":", 1)[1]:
@@ -94,7 +101,7 @@ for dataset in "${DATASETS[@]}"; do
         --limit "$LIMIT" \
         --top-bundles "$top_k" \
         --ordering-source "$ordering"
-      right_path="$(latest_replay_path "$dataset" "$PROMPT" "top:$top_k")"
+      right_path="$(latest_replay_path "$dataset" "$PROMPT" "top:$top_k" "$ordering")"
       python scripts/compare_context_budget_runs.py \
         --dataset "$dataset" \
         --prompt-profile "$PROMPT" \
@@ -113,7 +120,7 @@ for dataset in "${DATASETS[@]}"; do
         --limit "$LIMIT" \
         --context-token-budget "$budget" \
         --ordering-source "$ordering"
-      right_path="$(latest_replay_path "$dataset" "$PROMPT" "ctx:$budget")"
+      right_path="$(latest_replay_path "$dataset" "$PROMPT" "ctx:$budget" "$ordering")"
       python scripts/compare_context_budget_runs.py \
         --dataset "$dataset" \
         --prompt-profile "$PROMPT" \
@@ -151,6 +158,7 @@ headers = [
     "EM",
     "F1",
     "answer_in_prediction",
+    "answer_in_rendered_context",
     "insufficient_rate",
     "CtxTok",
     "InputTok",
@@ -176,6 +184,7 @@ for row in rows:
         row.get("right_EM"),
         row.get("right_F1"),
         row.get("right_answer_in_prediction"),
+        row.get("right_answer_in_rendered_context"),
         row.get("right_insufficient_rate"),
         row.get("right_CtxTok"),
         row.get("right_InputTok"),

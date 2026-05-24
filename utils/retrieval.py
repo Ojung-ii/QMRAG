@@ -295,6 +295,9 @@ class QueryMedoidRetriever:
         self.retrieval_variant = str(cfg.get("retrieval_variant", "full_hetero") or "full_hetero")
         if self.retrieval_variant not in {"full_hetero", "prop_text_only", "prop_parent_anchor", "prop_parent_mention_bidirectional"}:
             raise ValueError(f"Unsupported retrieval_variant={self.retrieval_variant!r}")
+        self.seed_selection_variant = str(cfg.get("seed_selection_variant", "medoid_current") or "medoid_current")
+        if self.seed_selection_variant not in {"medoid_current", "top_relevance", "anchor_first", "chain_potential"}:
+            raise ValueError(f"Unsupported seed_selection_variant={self.seed_selection_variant!r}")
         self.dense_indexes = dict(dense_indexes or {}) if isinstance(dense_indexes, Mapping) else {}
         self.index_dir = Path(dense_indexes) if dense_indexes is not None and not isinstance(dense_indexes, Mapping) else None
         self._dense_prop_matrix = None
@@ -354,6 +357,9 @@ class QueryMedoidRetriever:
         timings: Dict[str, float] = {}
         self._active_stage_durations: Dict[str,float] = defaultdict(float)
         self._active_stage_counts: Dict[str,int] = defaultdict(int)
+        self._diag_counters: Counter[str] = Counter()
+        self._pairwise_similarity_cache: Dict[Tuple[str, str], float] = {}
+        self._bridge_title_lookup_cache: Dict[Tuple[str, str], List[Mapping[str, Any]]] = {}
         def record_stage(stage: str, start: float, end: float, num_items_in: int | None = None, num_items_out: int | None = None, extra: Optional[Mapping[str,Any]] = None) -> None:
             if timing_recorder is not None:
                 timing_recorder.record(
@@ -372,9 +378,9 @@ class QueryMedoidRetriever:
         record_stage("query_preprocess", wall0, wall0+elapsed, 1, len(query_anchor_info.get("query_anchor_titles",[]) or []), {"retrieval_variant":self.retrieval_variant})
         metadata = {**(metadata or {}), "_query_anchor_titles":query_anchor_info.get("query_anchor_titles",[]), "_query_relation_titles":query_anchor_info.get("query_relation_titles",[])}
         wall0=time.time(); t0 = time.perf_counter(); candidates = self._candidate_retrieval(question, metadata); elapsed=time.perf_counter() - t0; timings["candidate_retrieval_s"] = elapsed
-        record_stage("candidate_retrieval", wall0, wall0+elapsed, 1, len(candidates), {"retrieval_variant":self.retrieval_variant})
-        wall0=time.time(); t0 = time.perf_counter(); seeds = self._sampled_medoid_seeding(candidates); elapsed=time.perf_counter() - t0; timings["seed_selection_s"] = elapsed; timings["medoid_seeding_s"] = elapsed
-        record_stage("seed_selection", wall0, wall0+elapsed, len(candidates), len(seeds), {"retrieval_variant":self.retrieval_variant})
+        record_stage("candidate_retrieval", wall0, wall0+elapsed, 1, len(candidates), {"retrieval_variant":self.retrieval_variant, **self._counter_subset("num_query_embedding_calls","num_dense_search_calls","num_bm25_search_calls","num_candidate_score_computations","unique_candidate_count","duplicate_candidate_count")})
+        wall0=time.time(); t0 = time.perf_counter(); seeds = self._select_seeds(candidates); elapsed=time.perf_counter() - t0; timings["seed_selection_s"] = elapsed; timings["medoid_seeding_s"] = elapsed
+        record_stage("seed_selection", wall0, wall0+elapsed, len(candidates), len(seeds), {"retrieval_variant":self.retrieval_variant,"seed_selection_variant":self.seed_selection_variant, **self._counter_subset("num_pairwise_similarity_computations","num_pairwise_similarity_cache_hits")})
         wall0=time.time(); t0 = time.perf_counter(); bundles = self._local_refinement(question, seeds, candidates, query_anchor_info); elapsed=time.perf_counter() - t0; timings["local_refinement_s"] = elapsed
         bridge_time=self._active_stage_durations.get("mention_bridge_expansion",0.0)
         residual_time=self._active_stage_durations.get("residual_bridge_selection",0.0)
@@ -449,13 +455,47 @@ class QueryMedoidRetriever:
             "generic_relation_top1":bool(top1.get("is_relation_title_bundle")),
             "query_anchor_coverage":query_anchor_coverage,
             "retrieval_variant":self.retrieval_variant,
+            "seed_selection_variant":self.seed_selection_variant,
+            "seed_selection_ms":round(float(timings.get("seed_selection_s",0.0) or 0.0)*1000.0,6),
+            "selected_seed_count":len(seeds),
             "seed_unit_type_distribution":seed_type_distribution,
             "selected_bundle_source_type_distribution":selected_bundle_source_type_distribution,
             "chain_success_by_seed_type":chain_success_by_seed_type,
             "anchor_connected_chain_by_seed_type":anchor_connected_chain_by_seed_type,
             "answer_slot_aligned_by_seed_type":answer_slot_aligned_by_seed_type,
+            **self._duplicate_diagnostics(candidates),
         })
         return {"question": question, "candidates": candidates, "seeds": seeds, "evidence_bundles": bundles, "diagnostics": diag.__dict__}
+
+    def _bump(self, key: str, amount: int = 1) -> None:
+        counters = getattr(self, "_diag_counters", None)
+        if counters is not None:
+            counters[key] += int(amount)
+
+    def _counter_subset(self, *keys: str) -> Dict[str, int]:
+        counters = getattr(self, "_diag_counters", Counter())
+        return {key: int(counters.get(key, 0)) for key in keys}
+
+    def _duplicate_diagnostics(self, candidates: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+        counters = getattr(self, "_diag_counters", Counter())
+        attempted = int(counters.get("num_candidate_additions", 0))
+        unique = int(counters.get("unique_candidate_count", len(candidates)))
+        duplicate = int(counters.get("duplicate_candidate_count", max(0, attempted - unique)))
+        return {
+            "num_query_embedding_calls": int(counters.get("num_query_embedding_calls", 0)),
+            "num_dense_search_calls": int(counters.get("num_dense_search_calls", 0)),
+            "num_bm25_search_calls": int(counters.get("num_bm25_search_calls", 0)),
+            "num_candidate_score_computations": int(counters.get("num_candidate_score_computations", 0)),
+            "num_candidate_score_cache_hits": int(counters.get("num_candidate_score_cache_hits", 0)),
+            "num_bridge_title_lookups": int(counters.get("num_bridge_title_lookups", 0)),
+            "num_bridge_title_cache_hits": int(counters.get("num_bridge_title_cache_hits", 0)),
+            "num_pairwise_similarity_computations": int(counters.get("num_pairwise_similarity_computations", 0)),
+            "num_pairwise_similarity_cache_hits": int(counters.get("num_pairwise_similarity_cache_hits", 0)),
+            "candidate_count_by_type": dict(Counter(str(c.get("unit", "unknown")) for c in candidates)),
+            "unique_candidate_count": unique,
+            "duplicate_candidate_count": duplicate,
+            "candidate_merge_reduction_rate": duplicate / max(1, attempted),
+        }
 
     def _seed_unit_type(self, cand: Mapping[str,Any]) -> str:
         unit=str(cand.get("unit") or cand.get("seed_unit_type") or "")
@@ -584,10 +624,12 @@ class QueryMedoidRetriever:
 
     def _add_candidate(self, merged: Dict[Tuple[str, str], Dict[str, Any]], cand: Dict[str, Any], component: str, score: float) -> None:
         key = (cand["unit"], cand["id"])
+        self._bump("num_candidate_additions")
         if key not in merged:
             cand["score_components"] = {}
             merged[key] = cand
         else:
+            self._bump("duplicate_candidate_count")
             merged[key].setdefault("raw_scores", {}).update(cand.get("raw_scores", {}))
         merged[key]["score_components"][component] = max(float(score), merged[key]["score_components"].get(component, float("-inf")))
 
@@ -604,12 +646,14 @@ class QueryMedoidRetriever:
         query_anchor_norms={_norm_phrase(t) for t in metadata.get("_query_anchor_titles",[]) or []}
 
         if "proposition" in search_units:
+            self._bump("num_bm25_search_calls")
             prop_pairs = self.prop_bm25.topk(question, bm25_top_k)
             norm = _rank_norm([("proposition", self.props[i]["prop_id"]) for i, _ in prop_pairs])
             for idx, raw in prop_pairs:
                 p = self.props[idx]
                 self._add_candidate(merged, self._prop_candidate(p, {"bm25":raw}), "bm25", norm[("proposition", p["prop_id"])])
         if "chunk" in search_units:
+            self._bump("num_bm25_search_calls")
             chunk_pairs = self.chunk_bm25.topk(question, max(1, bm25_top_k // 2))
             norm = _rank_norm([("chunk", self.chunks[i]["chunk_id"]) for i, _ in chunk_pairs])
             for idx, raw in chunk_pairs:
@@ -617,22 +661,27 @@ class QueryMedoidRetriever:
                 self._add_candidate(merged, {"unit":"chunk","id":c["chunk_id"],"title":c["title"],"text":c["text"],"chunk_id":c["chunk_id"],"tokens":c.get("token_count", token_count(c.get("text", ""))),"raw_scores":{"bm25":raw}}, "bm25", norm[("chunk", c["chunk_id"])])
 
         if self._dense_prop_matrix is not None or self._dense_chunk_matrix is not None:
+            self._bump("num_query_embedding_calls")
             qv = self._query_embedder.encode_queries([question])[0] if self._query_embedder is not None else None
             if qv is not None and "proposition" in search_units and self._dense_prop_matrix is not None:
+                self._bump("num_dense_search_calls")
                 pairs = self._dense_prop_matrix.search(qv, dense_top_k)
                 norm = _rank_norm([("proposition", self.props[idx]["prop_id"]) for idx, _ in pairs])
                 for idx, raw in pairs:
                     p = self.props[int(idx)]
                     self._add_candidate(merged, self._prop_candidate(p, {"dense":raw}), "dense", norm[("proposition", p["prop_id"])])
             if qv is not None and "chunk" in search_units and self._dense_chunk_matrix is not None:
+                self._bump("num_dense_search_calls")
                 pairs = self._dense_chunk_matrix.search(qv, max(1, dense_top_k // 2))
                 norm = _rank_norm([("chunk", self.chunks[idx]["chunk_id"]) for idx, _ in pairs])
                 for idx, raw in pairs:
                     c = self.chunks[int(idx)]
                     self._add_candidate(merged, {"unit":"chunk","id":c["chunk_id"],"title":c["title"],"text":c["text"],"chunk_id":c["chunk_id"],"tokens":c.get("token_count", token_count(c.get("text", ""))),"raw_scores":{"dense":raw}}, "dense", norm[("chunk", c["chunk_id"])])
         elif self.dense_indexes:
+            self._bump("num_query_embedding_calls")
             qvec = encode_query({"embedding": self.cfg.get("embedding", {})}, question, logger=self.logger, cache=self._embed_cache)
             if "proposition" in search_units and "proposition" in self.dense_indexes:
+                self._bump("num_dense_search_calls")
                 pairs = self.dense_indexes["proposition"].search(qvec, dense_top_k)
                 norm = _rank_norm([("proposition", pid) for pid, _ in pairs])
                 for pid, raw in pairs:
@@ -640,6 +689,7 @@ class QueryMedoidRetriever:
                     if p:
                         self._add_candidate(merged, self._prop_candidate(p, {"dense":raw}), "dense", norm[("proposition", pid)])
             if "chunk" in search_units and "chunk" in self.dense_indexes:
+                self._bump("num_dense_search_calls")
                 pairs = self.dense_indexes["chunk"].search(qvec, max(1, dense_top_k // 2))
                 norm = _rank_norm([("chunk", cid) for cid, _ in pairs])
                 for cid, raw in pairs:
@@ -668,21 +718,22 @@ class QueryMedoidRetriever:
                         self._add_candidate(merged, self._prop_candidate(p, {"entity":anchor_score}), "entity", anchor_score)
 
         candidates = []
+        self._diag_counters["unique_candidate_count"] = len(merged)
         for c in merged.values():
             comps = c.get("score_components", {})
+            self._bump("num_candidate_score_computations")
             c["score"] = w_bm25 * comps.get("bm25", 0.0) + w_dense * comps.get("dense", 0.0) + w_entity * comps.get("entity", 0.0)
             c["original_candidate_type"] = str(c.get("original_candidate_type") or c.get("unit") or "fallback")
             c["seed_unit_type"] = self._seed_unit_type(c)
             c["source_candidate_id"] = c.get("id")
             c["parent_title"] = c.get("parent_title") or c.get("title")
-            if c.get("unit") == "proposition":
-                mentioned=list(c.get("mentioned_titles") or self.prop_to_mentioned_titles.get(str(c.get("id")),[]) or [])
-                c["mentioned_titles"] = mentioned
-                parent_match=_norm_phrase(c.get("parent_title","")) in query_anchor_norms
-                mention_match=bool({_norm_phrase(t) for t in mentioned} & query_anchor_norms)
-                c["query_anchor_parent_match"] = parent_match
-                c["query_anchor_mention_match"] = mention_match
-                c["anchor_relation_priority"] = 2 if parent_match else (1 if mention_match else 0)
+            mentioned=list(c.get("mentioned_titles") or (self.prop_to_mentioned_titles.get(str(c.get("id")),[]) if c.get("unit") == "proposition" else []) or [])
+            c["mentioned_titles"] = mentioned
+            parent_match=_norm_phrase(c.get("parent_title","")) in query_anchor_norms
+            mention_match=bool({_norm_phrase(t) for t in mentioned} & query_anchor_norms)
+            c["query_anchor_parent_match"] = parent_match
+            c["query_anchor_mention_match"] = mention_match
+            c["anchor_relation_priority"] = 2 if parent_match else (1 if mention_match else 0)
             candidates.append(c)
         if self.retrieval_variant in {"prop_parent_anchor","prop_parent_mention_bidirectional"}:
             def key(c: Mapping[str,Any]):
@@ -714,6 +765,48 @@ class QueryMedoidRetriever:
             s["seed_rank"] = rank + 1; s["seed_objective"] = round(best_obj, 6)
         return best
 
+    def _candidate_anchor_connected(self, cand: Mapping[str, Any]) -> bool:
+        return bool(cand.get("query_anchor_parent_match") or cand.get("query_anchor_mention_match"))
+
+    def _candidate_mention_bearing(self, cand: Mapping[str, Any]) -> bool:
+        return bool(cand.get("mentioned_titles"))
+
+    def _ranked_seed_selection(self, candidates: Sequence[Mapping[str, Any]], variant: str) -> List[Dict[str, Any]]:
+        seed_count = min(int(self.cfg.get("seed_count", 4)), len(candidates))
+        if variant == "top_relevance":
+            key = lambda c: (float(c.get("score", 0.0) or 0.0), -float(c.get("tokens", 0.0) or 0.0))
+        elif variant == "anchor_first":
+            key = lambda c: (
+                self._candidate_anchor_connected(c),
+                float(c.get("score", 0.0) or 0.0),
+                -float(c.get("tokens", 0.0) or 0.0),
+            )
+        elif variant == "chain_potential":
+            key = lambda c: (
+                self._candidate_anchor_connected(c) or self._candidate_mention_bearing(c),
+                self._candidate_anchor_connected(c),
+                self._candidate_mention_bearing(c),
+                float(c.get("score", 0.0) or 0.0),
+                -float(c.get("tokens", 0.0) or 0.0),
+            )
+        else:
+            raise ValueError(f"Unsupported ranked seed selection variant={variant!r}")
+        seeds = [dict(c) for c in sorted(candidates, key=key, reverse=True)[:seed_count]]
+        for rank, seed in enumerate(seeds):
+            seed["seed_rank"] = rank + 1
+            seed["seed_selection_variant"] = variant
+        return seeds
+
+    def _select_seeds(self, candidates: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+        if not candidates:
+            return []
+        if self.seed_selection_variant == "medoid_current":
+            seeds = self._sampled_medoid_seeding(candidates)
+            for seed in seeds:
+                seed["seed_selection_variant"] = "medoid_current"
+            return seeds
+        return self._ranked_seed_selection(candidates, self.seed_selection_variant)
+
     def _weighted_sample_without_replacement(self, items: Sequence[Mapping[str, Any]], weights: Sequence[float], k: int) -> List[Mapping[str, Any]]:
         pool = list(zip(items, weights)); out: List[Mapping[str, Any]] = []
         for _ in range(min(k, len(pool))):
@@ -735,7 +828,7 @@ class QueryMedoidRetriever:
             best_idx = 0; best_score = -1e18
             for i, cand in enumerate(remaining):
                 rel = float(cand.get("score", 0.0)) / rel_scale
-                div = 1.0 if not selected else 1.0 - max(jaccard(tokenize(cand.get("text", "")), tokenize(s.get("text", ""))) for s in selected)
+                div = 1.0 if not selected else 1.0 - max(self._candidate_pairwise_similarity(cand, s) for s in selected)
                 cost = float(cand.get("tokens", 0)) / max(1, int(self.cfg.get("context_token_budget", 3000)))
                 score = rel + diversity_weight * div - cost
                 if score > best_score: best_idx, best_score = i, score
@@ -746,12 +839,25 @@ class QueryMedoidRetriever:
         if not seeds: return -1e18
         obj = 0.0
         for c in candidates:
-            ctoks = tokenize(c.get("text", ""))
-            max_sim = max(jaccard(ctoks, tokenize(s.get("text", ""))) for s in seeds)
+            max_sim = max(self._candidate_pairwise_similarity(c, s) for s in seeds)
             obj += float(c.get("score", 0.0)) * max_sim
         obj += sum(float(s.get("score", 0.0)) for s in seeds)
         obj -= sum(float(s.get("tokens", 0)) for s in seeds) / max(1, int(self.cfg.get("context_token_budget", 3000)))
         return obj
+
+    def _candidate_pairwise_similarity(self, left: Mapping[str, Any], right: Mapping[str, Any]) -> float:
+        left_id = f"{left.get('unit','?')}:{left.get('id') or left.get('source_candidate_id') or left.get('text','')}"
+        right_id = f"{right.get('unit','?')}:{right.get('id') or right.get('source_candidate_id') or right.get('text','')}"
+        key = tuple(sorted((left_id, right_id)))
+        cache = getattr(self, "_pairwise_similarity_cache", None)
+        if cache is not None and key in cache:
+            self._bump("num_pairwise_similarity_cache_hits")
+            return cache[key]
+        self._bump("num_pairwise_similarity_computations")
+        value = jaccard(tokenize(left.get("text", "")), tokenize(right.get("text", "")))
+        if cache is not None:
+            cache[key] = value
+        return value
 
     def _comparison_like(self, question: str) -> bool:
         return bool(set(_norm_tokens(question)) & COMPARISON_TERMS)
@@ -906,6 +1012,12 @@ class QueryMedoidRetriever:
     def _mention_rows_for_prop(self, prop_id: str, source_title: str) -> List[Mapping[str,Any]]:
         if not self.bridge_enabled:
             return []
+        cache_key=(str(prop_id),str(source_title))
+        cache=getattr(self,"_bridge_title_lookup_cache",None)
+        self._bump("num_bridge_title_lookups")
+        if cache is not None and cache_key in cache:
+            self._bump("num_bridge_title_cache_hits")
+            return list(cache[cache_key])
         max_mentions=int(self.bridge_cfg.get("max_mentions_per_prop",3))
         skip_ambiguous=bool(self.bridge_cfg.get("skip_ambiguous_aliases",True))
         remove_self=bool(self.bridge_cfg.get("remove_self_mentions",True))
@@ -927,6 +1039,8 @@ class QueryMedoidRetriever:
             rows.append(row)
             if len(rows)>=max_mentions:
                 break
+        if cache is not None:
+            cache[cache_key]=list(rows)
         return rows
 
     def _bridge_source_props(self, base_props: Sequence[Mapping[str,Any]], anchor_title: str) -> List[Mapping[str,Any]]:

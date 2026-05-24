@@ -1,0 +1,13 @@
+extends: ../default.yaml
+
+generation:
+  prompt_profile: common_qa
+  rendering_profile: structured_chain
+
+retrieval:
+  retrieval_variant: full_hetero
+  seed_selection_variant: top_relevance
+  bridge:
+    enabled: true
+    selection: residual_lexical
+    ordering: anchor_chain_aware

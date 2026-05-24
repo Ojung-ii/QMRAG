@@ -218,6 +218,10 @@ def replay_rows(
     for row in selected:
         source_context = context_from_row(row)
         source_hash = str(row.get("rendered_context_hash") or sha256_text(source_context))
+        source_context_tokens = row.get("rendered_context_tokens")
+        if source_context_tokens is None:
+            source_context_tokens = token_count(source_context)
+        source_input_tokens = row.get("input_prompt_tokens")
         original_bundle_count = len(row.get("evidence_bundles", []) or [])
         rendered_bundles = list(row.get("evidence_bundles", []) or [])
         dropped_bundle_count = 0
@@ -297,6 +301,15 @@ def replay_rows(
             usage=new_row.get("llm_usage"),
             model=new_row.get("llm_model") or row.get("llm_model"),
         )
+        if source_input_tokens is None:
+            try:
+                source_input_tokens = token_count(build_prompt(str(row.get("question", "")), source_context, source_prompt))
+            except Exception:
+                source_input_tokens = None
+        source_input_value = float(source_input_tokens or 0.0)
+        new_row["source_rendered_context_tokens"] = int(source_context_tokens or 0)
+        new_row["source_input_prompt_tokens"] = int(source_input_value or 0)
+        new_row["token_reduction_rate"] = 1.0 - float(new_row.get("input_prompt_tokens", 0.0) or 0.0) / max(1e-9, source_input_value) if source_input_value > 0 else 0.0
         out.append(new_row)
     return out
 
@@ -426,6 +439,7 @@ def main() -> None:
             "ordering_source": args.ordering_source,
             "avg_rendered_bundle_count": sum(float(x.get("rendered_bundle_count", 0.0) or 0.0) for x in replayed) / max(1, len(replayed)),
             "avg_dropped_bundle_count": sum(float(x.get("dropped_bundle_count", 0.0) or 0.0) for x in replayed) / max(1, len(replayed)),
+            "token_reduction_rate": sum(float(x.get("token_reduction_rate", 0.0) or 0.0) for x in replayed) / max(1, len(replayed)),
             "source_row_count": len(rows),
             "selected_row_count": len(replayed),
             "row_count_matches_selection": len(replayed) == expected_selected_count,
@@ -458,6 +472,7 @@ def main() -> None:
                 "ordering_source": args.ordering_source,
                 "avg_rendered_bundle_count": result.get("avg_rendered_bundle_count"),
                 "avg_dropped_bundle_count": result.get("avg_dropped_bundle_count"),
+                "token_reduction_rate": result.get("token_reduction_rate"),
                 "avg_prompt_template_tokens": result.get("avg_prompt_template_tokens"),
                 "avg_rendered_context_tokens": result.get("avg_rendered_context_tokens"),
                 "avg_input_prompt_tokens": result.get("avg_input_prompt_tokens"),

@@ -40,6 +40,7 @@ indexing:
 
 retrieval:
   retrieval_variant: full_hetero
+  seed_selection_variant: medoid_current
   random_seed: 13
   search_units: [proposition, chunk, entity]
   candidate_top_k: 80

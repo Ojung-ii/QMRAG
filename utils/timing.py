@@ -107,13 +107,28 @@ class TimingRecorder:
 
     def summary(self) -> dict[str, Any]:
         by_stage: dict[str, list[float]] = {}
+        extra_by_stage: dict[str, dict[str, list[float]]] = {}
         for event in self._events:
-            by_stage.setdefault(str(event.get("stage")), []).append(float(event.get("duration_ms", 0.0) or 0.0))
+            stage = str(event.get("stage"))
+            by_stage.setdefault(stage, []).append(float(event.get("duration_ms", 0.0) or 0.0))
+            extra = event.get("extra") or {}
+            if isinstance(extra, Mapping):
+                bucket = extra_by_stage.setdefault(stage, {})
+                for key, value in extra.items():
+                    if isinstance(value, bool):
+                        continue
+                    if isinstance(value, (int, float)):
+                        bucket.setdefault(str(key), []).append(float(value))
         stages: dict[str, dict[str, Any]] = {}
         for stage, values in sorted(by_stage.items()):
             vals = sorted(values)
             if not vals:
                 continue
+            extra_means = {
+                key: round(sum(nums) / len(nums), 6)
+                for key, nums in sorted(extra_by_stage.get(stage, {}).items())
+                if nums
+            }
             p95_idx = min(len(vals) - 1, int(0.95 * (len(vals) - 1)))
             stages[stage] = {
                 "total_ms": round(sum(vals), 6),
@@ -122,6 +137,7 @@ class TimingRecorder:
                 "p95_ms": round(vals[p95_idx], 6),
                 "max_ms": round(max(vals), 6),
                 "count": len(vals),
+                "extra_mean": extra_means,
             }
         return {
             "created_at": datetime.now().isoformat(timespec="seconds"),
@@ -134,12 +150,13 @@ class TimingRecorder:
             return {}
         summary = self.summary()
         dump_json(summary, self.summary_path)
-        lines = ["# Timing Summary", "", "| stage | count | total_ms | mean_ms | p50_ms | p95_ms | max_ms |", "|---|---:|---:|---:|---:|---:|---:|"]
+        lines = ["# Timing Summary", "", "| stage | count | total_ms | mean_ms | p50_ms | p95_ms | max_ms | extra_mean |", "|---|---:|---:|---:|---:|---:|---:|---|"]
         for stage, row in summary.get("stages", {}).items():
+            extra_mean = json.dumps(row.get("extra_mean", {}), ensure_ascii=False, sort_keys=True)
             lines.append(
                 f"| {stage} | {row.get('count', 0)} | {row.get('total_ms', 0):.3f} | "
                 f"{row.get('mean_ms', 0):.3f} | {row.get('p50_ms', 0):.3f} | "
-                f"{row.get('p95_ms', 0):.3f} | {row.get('max_ms', 0):.3f} |"
+                f"{row.get('p95_ms', 0):.3f} | {row.get('max_ms', 0):.3f} | {extra_mean} |"
             )
         self.summary_md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return summary

@@ -64,6 +64,14 @@ def infer_retrieval_variant(rows: Iterable[Dict[str, Any]]) -> str:
     return "full_hetero"
 
 
+def infer_seed_selection_variant(rows: Iterable[Dict[str, Any]]) -> str:
+    for row in rows:
+        value=row.get("seed_selection_variant") or (row.get("retrieval_diagnostics",{}) or {}).get("seed_selection_variant")
+        if value:
+            return str(value)
+    return "medoid_current"
+
+
 def iter_prediction_files(output_root: Path) -> Iterable[Path]:
     yield from sorted(output_root.rglob("predictions.jsonl"))
 
@@ -74,6 +82,7 @@ def summarize(path: Path) -> Dict[str, Any]:
     prompt_profile=infer_prompt(rows)
     rendering_profile=infer_rendering(rows)
     retrieval_variant=infer_retrieval_variant(rows)
+    seed_selection_variant=infer_seed_selection_variant(rows)
     result=evaluate_predictions(rows, dataset=dataset, prompt_profile=prompt_profile)
     raw_none=sum(1 for row in rows if row.get("raw_prediction") is None)
     denom=max(1,len(rows))
@@ -82,6 +91,7 @@ def summarize(path: Path) -> Dict[str, Any]:
         "prompt_profile": prompt_profile,
         "rendering_profile": rendering_profile,
         "retrieval_variant": retrieval_variant,
+        "seed_selection_variant": seed_selection_variant,
         "prompt_experiment_type": result.get("prompt_experiment_type", "unknown"),
         "n": result.get("n", 0),
         "answer_in_evidence_bundles": result.get("answer_in_evidence_bundles", result.get("answer_in_context", 0.0)),
@@ -101,6 +111,17 @@ def summarize(path: Path) -> Dict[str, Any]:
         "avg_bridge_bundle_count": result.get("avg_bridge_bundle_count", 0.0),
         "CtxTok": result.get("context_tokens", 0.0),
         "LatencyMs": result.get("latency_ms", 0.0),
+        "RetrievalMs": result.get("retrieval_latency_ms", 0.0),
+        "SeedSelectionMs": result.get("seed_selection_ms", 0.0),
+        "QueryEmbCalls": result.get("num_query_embedding_calls", 0.0),
+        "DenseSearchCalls": result.get("num_dense_search_calls", 0.0),
+        "BM25SearchCalls": result.get("num_bm25_search_calls", 0.0),
+        "CandScoreComp": result.get("num_candidate_score_computations", 0.0),
+        "BridgeLookups": result.get("num_bridge_title_lookups", 0.0),
+        "BridgeCacheHits": result.get("num_bridge_title_cache_hits", 0.0),
+        "PairwiseComp": result.get("num_pairwise_similarity_computations", 0.0),
+        "PairwiseCacheHits": result.get("num_pairwise_similarity_cache_hits", 0.0),
+        "CandidateMergeReduction": result.get("candidate_merge_reduction_rate", 0.0),
         "idk_rate": result.get("idk_rate", 0.0),
         "insufficient_rate": result.get("insufficient_rate", 0.0),
         "raw_none_rate": raw_none/denom,
@@ -116,16 +137,16 @@ def summarize(path: Path) -> Dict[str, Any]:
 
 
 def latest_by_dataset_prompt(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    latest: Dict[Tuple[str, str, str, str], Dict[str, Any]]={}
+    latest: Dict[Tuple[str, str, str, str, str], Dict[str, Any]]={}
     for row in rows:
-        key=(str(row["dataset"]), str(row["prompt_profile"]), str(row["rendering_profile"]), str(row.get("retrieval_variant","full_hetero")))
+        key=(str(row["dataset"]), str(row["prompt_profile"]), str(row["rendering_profile"]), str(row.get("retrieval_variant","full_hetero")), str(row.get("seed_selection_variant","medoid_current")))
         if key not in latest or float(row["mtime"]) > float(latest[key]["mtime"]):
             latest[key]=row
-    return sorted(latest.values(), key=lambda r: (str(r["dataset"]), str(r["prompt_profile"]), str(r["rendering_profile"]), str(r.get("retrieval_variant","full_hetero"))))
+    return sorted(latest.values(), key=lambda r: (str(r["dataset"]), str(r["prompt_profile"]), str(r["rendering_profile"]), str(r.get("retrieval_variant","full_hetero")), str(r.get("seed_selection_variant","medoid_current"))))
 
 
 def markdown_table(rows: List[Dict[str, Any]]) -> str:
-    headers=["dataset","prompt_profile","rendering_profile","retrieval_variant","prompt_experiment_type","n","seed_title_rate","seed_chunk_rate","seed_proposition_rate","chain_from_title_rate","chain_from_chunk_rate","chain_from_proposition_rate","bridge_connected_rate","answer_slot_aligned_rate","chain_complete_v2_rate","anchor_connected_chain_complete_rate","anchor_mismatch_chain_rate","multi_anchor_bundle_rate","generic_relation_top1_rate","query_anchor_coverage_rate","avg_residual_coverage_count","chain_complete_rate","avg_bridge_title_count","avg_bridge_bundle_count","answer_in_evidence_bundles","answer_in_rendered_context","answer_in_prediction","idk_rate","insufficient_rate","CtxTok","LatencyMs","raw_none_rate","path"]
+    headers=["dataset","prompt_profile","rendering_profile","retrieval_variant","seed_selection_variant","prompt_experiment_type","n","seed_title_rate","seed_chunk_rate","seed_proposition_rate","chain_from_title_rate","chain_from_chunk_rate","chain_from_proposition_rate","bridge_connected_rate","answer_slot_aligned_rate","chain_complete_v2_rate","anchor_connected_chain_complete_rate","anchor_mismatch_chain_rate","multi_anchor_bundle_rate","generic_relation_top1_rate","query_anchor_coverage_rate","avg_residual_coverage_count","chain_complete_rate","avg_bridge_title_count","avg_bridge_bundle_count","answer_in_evidence_bundles","answer_in_rendered_context","answer_in_prediction","idk_rate","insufficient_rate","CtxTok","LatencyMs","RetrievalMs","SeedSelectionMs","QueryEmbCalls","DenseSearchCalls","BM25SearchCalls","CandScoreComp","BridgeLookups","BridgeCacheHits","PairwiseComp","PairwiseCacheHits","CandidateMergeReduction","raw_none_rate","path"]
     lines=["| "+" | ".join(headers)+" |","| "+" | ".join(["---"]*len(headers))+" |"]
     for row in rows:
         lines.append(
@@ -135,6 +156,7 @@ def markdown_table(rows: List[Dict[str, Any]]) -> str:
                 str(row["prompt_profile"]),
                 str(row["rendering_profile"]),
                 str(row.get("retrieval_variant","full_hetero")),
+                str(row.get("seed_selection_variant","medoid_current")),
                 str(row["prompt_experiment_type"]),
                 str(row["n"]),
                 f"{float(row['seed_title_rate']):.4f}",
@@ -162,6 +184,17 @@ def markdown_table(rows: List[Dict[str, Any]]) -> str:
                 f"{float(row['insufficient_rate']):.4f}",
                 f"{float(row['CtxTok']):.1f}",
                 f"{float(row['LatencyMs']):.1f}",
+                f"{float(row['RetrievalMs']):.1f}",
+                f"{float(row['SeedSelectionMs']):.1f}",
+                f"{float(row['QueryEmbCalls']):.2f}",
+                f"{float(row['DenseSearchCalls']):.2f}",
+                f"{float(row['BM25SearchCalls']):.2f}",
+                f"{float(row['CandScoreComp']):.2f}",
+                f"{float(row['BridgeLookups']):.2f}",
+                f"{float(row['BridgeCacheHits']):.2f}",
+                f"{float(row['PairwiseComp']):.2f}",
+                f"{float(row['PairwiseCacheHits']):.2f}",
+                f"{float(row['CandidateMergeReduction']):.4f}",
                 f"{float(row['raw_none_rate']):.4f}",
                 str(row["path"]),
             ])

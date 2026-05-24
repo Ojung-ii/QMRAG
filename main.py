@@ -24,6 +24,7 @@ def parse_args():
     p.add_argument("--prompt-profile", choices=sorted(PROMPT_TEMPLATES), default=None)
     p.add_argument("--rendering-profile", choices=sorted(RENDERING_PROFILES), default=None)
     p.add_argument("--retrieval-variant", choices=["full_hetero","prop_text_only","prop_parent_anchor","prop_parent_mention_bidirectional"], default=None)
+    p.add_argument("--seed-selection-variant", choices=["medoid_current","top_relevance","anchor_first","chain_potential"], default=None)
     p.add_argument("--enable-timing", action="store_true")
     p.add_argument("--continue-on-error", action="store_true")
     return p.parse_args()
@@ -51,6 +52,8 @@ def apply_overrides(cfg: Dict[str,Any], args) -> Dict[str,Any]:
         cfg.setdefault("indexing",{}).setdefault("embedding",{})["batch_size"]=args.embedding_batch_size; cfg.setdefault("retrieval",{}).setdefault("embedding",{})["batch_size"]=args.embedding_batch_size
     if args.retrieval_variant:
         cfg.setdefault("retrieval",{})["retrieval_variant"]=args.retrieval_variant
+    if args.seed_selection_variant:
+        cfg.setdefault("retrieval",{})["seed_selection_variant"]=args.seed_selection_variant
     if args.enable_timing:
         cfg.setdefault("run",{})["enable_timing"]=True
     idx_emb=cfg.get("indexing",{}).get("embedding",{})
@@ -305,7 +308,7 @@ def run_dataset(dataset: str, cfg: Dict[str,Any], args, timestamp: str):
     copy_compat_index(index_dir,compat_dir,logger)
     if args.mode=="index":
         timing.write_summary()
-        return {"dataset":dataset,"n":0,"status":"indexed","prompt_profile":prompt_profile,"rendering_profile":rendering_profile,"retrieval_variant":str(cfg.get("retrieval",{}).get("retrieval_variant","full_hetero")),"index_dir":str(index_dir),**index_info,"index_meta":idx.get("meta",{})}
+        return {"dataset":dataset,"n":0,"status":"indexed","prompt_profile":prompt_profile,"rendering_profile":rendering_profile,"retrieval_variant":str(cfg.get("retrieval",{}).get("retrieval_variant","full_hetero")),"seed_selection_variant":str(cfg.get("retrieval",{}).get("seed_selection_variant","medoid_current")),"index_dir":str(index_dir),**index_info,"index_meta":idx.get("meta",{})}
     retriever=QueryMedoidRetriever(idx,cfg.get("retrieval",{}),dense_indexes,logger); preds=[]; pko=out_dir/"예측결과.jsonl"; pen=out_dir/"predictions.jsonl"
     for p in [pko,pen]:
         if p.exists(): p.unlink()
@@ -325,14 +328,15 @@ def run_dataset(dataset: str, cfg: Dict[str,Any], args, timestamp: str):
                     row_prompt_profile=str(gen.get("prompt_profile",prompt_profile))
                     row_rendering_profile=str(gen.get("rendering_profile",rendering_profile) or DEFAULT_RENDERING_PROFILE)
                     retrieval_variant=str(cfg.get("retrieval",{}).get("retrieval_variant","full_hetero"))
-                    row={"dataset":dataset,"id":qa.id,"question":qa.question,"raw_prediction":raw_prediction,"prediction":prediction,"answers":qa.answers,"support_titles":qa.support_titles,"support_facts":qa.support_facts,"prompt_profile":row_prompt_profile,"rendering_profile":row_rendering_profile,"prompt_experiment_type":prompt_experiment_type(row_prompt_profile,row_rendering_profile),"retrieval_variant":retrieval_variant,"generation_provider":generation_provider,"evidence_bundles":ret["evidence_bundles"],"seeds":ret["seeds"],"retrieval_diagnostics":ret["diagnostics"],"generation_latency_s":float(gen.get("generation_latency_s",round(time.perf_counter()-t,6)) or 0.0),"llm_provider":generation_provider,"llm_model":gen.get("model"),"llm_usage":gen.get("usage")}
+                    seed_selection_variant=str(cfg.get("retrieval",{}).get("seed_selection_variant","medoid_current"))
+                    row={"dataset":dataset,"id":qa.id,"question":qa.question,"raw_prediction":raw_prediction,"prediction":prediction,"answers":qa.answers,"support_titles":qa.support_titles,"support_facts":qa.support_facts,"prompt_profile":row_prompt_profile,"rendering_profile":row_rendering_profile,"prompt_experiment_type":prompt_experiment_type(row_prompt_profile,row_rendering_profile),"retrieval_variant":retrieval_variant,"seed_selection_variant":seed_selection_variant,"generation_provider":generation_provider,"evidence_bundles":ret["evidence_bundles"],"seeds":ret["seeds"],"retrieval_diagnostics":ret["diagnostics"],"generation_latency_s":float(gen.get("generation_latency_s",round(time.perf_counter()-t,6)) or 0.0),"llm_provider":generation_provider,"llm_model":gen.get("model"),"llm_usage":gen.get("usage")}
                     if gen.get("generation_error"): row["generation_error"]=gen.get("generation_error")
                     row=add_generation_logging_fields(row,gen,cfg)
                 except Exception as e:
                     logger.event({"event":"example.error","dataset":dataset,"qid":qa.id,"error":repr(e)})
                     if not args.continue_on_error: raise
                     generation_provider=cfg.get("generation",{}).get("provider")
-                    row={"dataset":dataset,"id":qa.id,"question":qa.question,"raw_prediction":"","prediction":"","answers":qa.answers,"support_titles":qa.support_titles,"prompt_profile":prompt_profile,"rendering_profile":rendering_profile,"prompt_experiment_type":prompt_experiment_type(prompt_profile,rendering_profile),"retrieval_variant":str(cfg.get("retrieval",{}).get("retrieval_variant","full_hetero")),"generation_provider":generation_provider,"error":repr(e),"evidence_bundles":[],"seeds":[],"retrieval_diagnostics":{"candidate_count":0,"seed_count":0,"bundle_count":0,"context_tokens":0,"timings":{}},"generation_latency_s":0.0,"llm_provider":generation_provider}
+                    row={"dataset":dataset,"id":qa.id,"question":qa.question,"raw_prediction":"","prediction":"","answers":qa.answers,"support_titles":qa.support_titles,"prompt_profile":prompt_profile,"rendering_profile":rendering_profile,"prompt_experiment_type":prompt_experiment_type(prompt_profile,rendering_profile),"retrieval_variant":str(cfg.get("retrieval",{}).get("retrieval_variant","full_hetero")),"seed_selection_variant":str(cfg.get("retrieval",{}).get("seed_selection_variant","medoid_current")),"generation_provider":generation_provider,"error":repr(e),"evidence_bundles":[],"seeds":[],"retrieval_diagnostics":{"candidate_count":0,"seed_count":0,"bundle_count":0,"context_tokens":0,"timings":{}},"generation_latency_s":0.0,"llm_provider":generation_provider}
                     row=add_generation_logging_fields(row,{"rendered_context":"","prompt":""},cfg)
                 preds.append(row)
                 with timing.time_block(dataset=dataset, query_id=qa.id, stage="write_outputs", num_items_in=1) as twrite:
@@ -343,6 +347,7 @@ def run_dataset(dataset: str, cfg: Dict[str,Any], args, timestamp: str):
             log_retrieval_summary(preds,logger)
             res=evaluate_predictions(preds,dataset=dataset,prompt_profile=prompt_profile); res["index_dir"]=str(index_dir); res["index_source"]=index_info.get("index_source"); res["bridge_config"]=dict(cfg.get("retrieval",{}).get("bridge",{}) or {})
             res["retrieval_variant"]=str(cfg.get("retrieval",{}).get("retrieval_variant","full_hetero"))
+            res["seed_selection_variant"]=str(cfg.get("retrieval",{}).get("seed_selection_variant","medoid_current"))
             if index_info.get("source_index_dir"): res["source_index_dir"]=index_info.get("source_index_dir")
             dump_json(res,out_dir/"eval.json"); (out_dir/"eval_summary.md").write_text(summary_markdown(dataset,res),encoding="utf-8")
     timing_summary=timing.write_summary()
