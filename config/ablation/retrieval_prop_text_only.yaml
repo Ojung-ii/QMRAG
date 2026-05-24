@@ -1,0 +1,16 @@
+extends: ../default.yaml
+
+generation:
+  prompt_profile: common_qa
+  rendering_profile: structured_chain
+
+retrieval:
+  retrieval_variant: prop_text_only
+  dense:
+    enabled: true
+    top_k: 80
+    units: [proposition]
+  bridge:
+    enabled: true
+    selection: residual_lexical
+    ordering: anchor_chain_aware

@@ -14,7 +14,16 @@ def _expand_env(obj: Any) -> Any:
     if isinstance(obj,dict): return {k:_expand_env(v) for k,v in obj.items()}
     return obj
 def load_yaml(path: str|Path) -> Dict[str,Any]:
-    with open(path,"r",encoding="utf-8") as f: return _expand_env(yaml.safe_load(f) or {})
+    path=Path(path)
+    with open(path,"r",encoding="utf-8") as f:
+        data=_expand_env(yaml.safe_load(f) or {})
+    if isinstance(data,dict) and data.get("extends"):
+        base_path=Path(str(data.pop("extends")))
+        if not base_path.is_absolute():
+            base_path=path.parent/base_path
+        base=load_yaml(base_path)
+        return dict(deep_update(base,data))
+    return data
 def dump_yaml(obj: Mapping[str,Any], path: str|Path) -> None:
     ensure_dir(Path(path).parent)
     with open(path,"w",encoding="utf-8") as f: yaml.safe_dump(dict(obj), f, allow_unicode=True, sort_keys=False)

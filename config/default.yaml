@@ -6,6 +6,11 @@ run:
   echo_logs: true
   save_prompts: false
 
+logging:
+  save_rendered_context: true
+  save_full_prompt: false
+  rendered_context_preview_chars: 2000
+
 indexing:
   # QMRAG keeps indexing cheap: title entity hub + sentence propositions + packed source chunks.
   # Chunk is a source/provenance span. Retrieval primarily uses propositions.
@@ -34,6 +39,8 @@ indexing:
     save_dtype: float16
 
 retrieval:
+  retrieval_variant: full_hetero
+  seed_selection_variant: medoid_current
   random_seed: 13
   search_units: [proposition, chunk, entity]
   candidate_top_k: 80
@@ -60,6 +67,20 @@ retrieval:
     enabled: true
     top_k: 80
     units: [proposition, chunk]
+  bridge:
+    enabled: true
+    selection: residual_lexical
+    max_mentions_per_prop: 3
+    max_bridge_titles_per_seed: 2
+    max_bridge_props_per_title: 2
+    skip_ambiguous_aliases: true
+    min_alias_tokens: 2
+    remove_self_mentions: true
+    ordering: anchor_chain_aware
+    anchor_constrained: true
+    multi_anchor_bundle: true
+    demote_generic_relation_titles: true
+    use_automaton: true
   # main.py copies indexing.embedding into retrieval.embedding unless overridden.
   embedding: {}
   refine:
@@ -80,7 +101,12 @@ generation:
   retry_sleep_s: 2.0
   max_context_chars: 16000
   prompt_profile: common_qa
+  rendering_profile: structured_chain
   system_message: ""
+  token_counting:
+    enabled: true
+    tokenizer_model: auto
+    fallback_to_estimate: true
 
 eval:
   metrics: [em, f1, answer_contains, support_title_recall, context_tokens, latency_ms]
@@ -102,4 +128,3 @@ datasets:
     type: musique
     qa_path: data/musique/musique.json
     corpus_path: data/musique/musique_corpus.json
-
