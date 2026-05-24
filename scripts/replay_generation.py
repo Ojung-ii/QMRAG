@@ -25,9 +25,9 @@ from scripts.analyze_failures import (
     summarize_prediction_file,
 )
 from utils.eval_metrics import evaluate_predictions, summary_markdown
-from utils.generation import DEFAULT_RENDERING_PROFILE, PROMPT_TEMPLATES, RENDERING_PROFILES, build_prompt, normalize_prediction_for_eval, render_context
+from utils.generation import DEFAULT_RENDERING_PROFILE, PROMPT_TEMPLATES, RENDERING_PROFILES, add_token_accounting_fields, build_prompt, normalize_prediction_for_eval, render_context
 from utils.io_utils import dump_json, load_yaml, read_jsonl, write_jsonl
-from utils.text import safe_truncate, token_count
+from utils.text import safe_truncate
 
 
 def now_timestamp() -> str:
@@ -178,7 +178,7 @@ def replay_rows(
                 "prediction": str(row.get("prediction", row.get("raw_prediction", "")) or ""),
                 "generation_provider": "schema_replay_no_llm",
                 "llm_provider": "schema_replay_no_llm",
-                "llm_model": None,
+                "llm_model": row.get("llm_model"),
                 "llm_usage": {},
             }
         else:
@@ -204,12 +204,21 @@ def replay_rows(
                 "rendered_context_hash": actual_hash,
                 "source_rendered_context_hash": source_hash,
                 "rendered_context_hash_match": actual_hash == source_hash,
-                "rendered_context_tokens": token_count(context),
                 "evidence_bundles_hash": json_hash(row.get("evidence_bundles", []) or []),
                 "source_evidence_bundles_hash": str(row.get("evidence_bundles_hash") or json_hash(row.get("evidence_bundles", []) or [])),
                 "evidence_bundles_hash_match": True,
                 "prompt_hash": sha256_text(prompt),
             }
+        )
+        new_row = add_token_accounting_fields(
+            new_row,
+            prompt,
+            context,
+            new_row.get("raw_prediction", ""),
+            target_prompt,
+            cfg,
+            usage=new_row.get("llm_usage"),
+            model=new_row.get("llm_model") or row.get("llm_model"),
         )
         out.append(new_row)
     return out
@@ -332,6 +341,12 @@ def main() -> None:
                 "rendering_profile": target_rendering,
                 "failure_category": args.failure_category,
                 "prompt_experiment_type": result["prompt_experiment_type"],
+                "avg_prompt_template_tokens": result.get("avg_prompt_template_tokens"),
+                "avg_rendered_context_tokens": result.get("avg_rendered_context_tokens"),
+                "avg_input_prompt_tokens": result.get("avg_input_prompt_tokens"),
+                "avg_completion_tokens": result.get("avg_completion_tokens"),
+                "avg_total_llm_tokens": result.get("avg_total_llm_tokens"),
+                "token_count_source_counts": result.get("token_count_source_counts"),
                 "no_llm": bool(args.no_llm or args.dry_run),
             },
             ensure_ascii=False,

@@ -6,12 +6,12 @@ from tabulate import tabulate
 from tqdm import tqdm
 from utils.data_loaders import load_dataset
 from utils.eval_metrics import evaluate_predictions, summary_markdown
-from utils.generation import DEFAULT_PROMPT_PROFILE, DEFAULT_RENDERING_PROFILE, PROMPT_TEMPLATES, RENDERING_PROFILES, generate_answer, normalize_prediction_for_eval
+from utils.generation import DEFAULT_PROMPT_PROFILE, DEFAULT_RENDERING_PROFILE, PROMPT_TEMPLATES, RENDERING_PROFILES, add_token_accounting_fields, generate_answer, normalize_prediction_for_eval
 from utils.indexing import LightweightEPCIndexer, ensure_mention_bridge_index
 from utils.embedding import build_or_load_dense_indexes
 from utils.io_utils import ExperimentLogger, dump_json, dump_yaml, ensure_dir, load_yaml, now_timestamp, to_jsonable
 from utils.retrieval import QueryMedoidRetriever
-from utils.text import safe_truncate, token_count
+from utils.text import safe_truncate
 
 def parse_args():
     p=argparse.ArgumentParser(description="QMRAG: Query-conditioned Medoid RAG runner")
@@ -161,8 +161,12 @@ def add_generation_logging_fields(row: Dict[str,Any], gen: Mapping[str,Any], cfg
     log_cfg=cfg.get("logging",{}) if cfg else {}
     rendered_context=str(gen.get("rendered_context") or "")
     prompt=str(gen.get("prompt") or "")
+    prompt_profile=str(row.get("prompt_profile") or gen.get("prompt_profile") or DEFAULT_PROMPT_PROFILE)
+    raw_prediction=str(row.get("raw_prediction", gen.get("raw_prediction", gen.get("prediction",""))) or "")
+    usage=gen.get("usage") or gen.get("llm_usage") or row.get("llm_usage")
+    model=gen.get("model") or gen.get("llm_model") or row.get("llm_model")
     preview_chars=int(log_cfg.get("rendered_context_preview_chars",2000) or 2000)
-    row["rendered_context_tokens"]=token_count(rendered_context)
+    row=add_token_accounting_fields(row,prompt,rendered_context,raw_prediction,prompt_profile,cfg.get("generation",{}) if cfg else {},usage=usage,model=model)
     row["rendered_context_preview"]=safe_truncate(rendered_context, preview_chars)
     row["rendered_context_hash"]=sha256_text(rendered_context)
     row["prompt_hash"]=sha256_text(prompt)

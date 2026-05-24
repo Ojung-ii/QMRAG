@@ -13,7 +13,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.analyze_failures import infer_dataset, infer_prompt, infer_rendering
-from utils.eval_metrics import answer_contains, answer_f1, answer_in_rendered_context, exact_match, text_has_gold
+from utils.eval_metrics import answer_contains, answer_f1, answer_in_rendered_context, exact_match, row_token_metrics, text_has_gold
 from utils.io_utils import dump_json, ensure_dir, read_jsonl
 from utils.text import normalize_text
 
@@ -196,6 +196,7 @@ def evaluate_file(path: Path, analysis_dir: Path) -> dict[str, Any]:
         answers = [str(x) for x in row.get("answers", [])]
         retrieval_ms, generation_ms, total_ms = timing_ms(row)
         sm = support_metrics(row, 5)
+        tm = row_token_metrics(row)
         per.append(
             {
                 "id": row.get("id"),
@@ -204,11 +205,11 @@ def evaluate_file(path: Path, analysis_dir: Path) -> dict[str, Any]:
                 "f1": answer_f1(raw, answers),
                 "answer_in_rendered_context": answer_in_rendered_context(row, answers),
                 "answer_in_prediction": answer_contains(raw, answers),
-                "avg_context_tokens": float(row.get("rendered_context_tokens") or (row.get("retrieval_diagnostics", {}) or {}).get("context_tokens") or 0.0),
                 "retrieval_ms": retrieval_ms,
                 "generation_ms": generation_ms,
                 "total_ms": total_ms,
                 **sm,
+                **tm,
             }
         )
     summary = {
@@ -220,8 +221,13 @@ def evaluate_file(path: Path, analysis_dir: Path) -> dict[str, Any]:
         "Recall@5": avg([x["recall_at_5"] for x in per]),
         "EM": avg([x["em"] for x in per]),
         "F1": avg([x["f1"] for x in per]),
-        "avg_context_tokens": avg([x["avg_context_tokens"] for x in per]),
-        "F1_per_1k_context_tokens": avg([x["f1"] for x in per]) / max(1e-9, avg([x["avg_context_tokens"] for x in per]) / 1000.0),
+        "avg_context_tokens": avg([x["rendered_context_tokens"] for x in per]),
+        "avg_input_prompt_tokens": avg([x["input_prompt_tokens"] for x in per]),
+        "avg_completion_tokens": avg([x["completion_tokens"] for x in per]),
+        "avg_total_llm_tokens": avg([x["total_llm_tokens"] for x in per]),
+        "F1_per_1k_context_tokens": avg([x["f1"] for x in per]) / max(1e-9, avg([x["rendered_context_tokens"] for x in per]) / 1000.0),
+        "F1_per_1k_input_prompt_tokens": avg([x["f1"] for x in per]) / max(1e-9, avg([x["input_prompt_tokens"] for x in per]) / 1000.0),
+        "F1_per_1k_total_llm_tokens": avg([x["f1"] for x in per]) / max(1e-9, avg([x["total_llm_tokens"] for x in per]) / 1000.0),
         "supporting_fact_precision": avg_optional([x["supporting_fact_precision"] for x in per]),
         "supporting_fact_recall": avg_optional([x["supporting_fact_recall"] for x in per]),
         "supporting_fact_f1": avg_optional([x["supporting_fact_f1"] for x in per]),
@@ -230,6 +236,7 @@ def evaluate_file(path: Path, analysis_dir: Path) -> dict[str, Any]:
         "retrieval_ms": avg([x["retrieval_ms"] for x in per]),
         "generation_ms": avg([x["generation_ms"] for x in per]),
         "total_ms": avg([x["total_ms"] for x in per]),
+        "token_count_source_counts": {k: sum(1 for x in per if x.get("token_count_source") == k) for k in sorted({str(x.get("token_count_source","unknown")) for x in per})},
         "supporting_fact_mode": "title_compatible",
         "support_labeled_rate": avg([1.0 if x["has_support_labels"] else 0.0 for x in per]),
         "source_predictions": str(path),
@@ -289,10 +296,27 @@ def markdown_summary(summary: Mapping[str, Any]) -> str:
         f"- rendering_profile: {summary.get('rendering_profile')}",
         f"- supporting_fact_mode: {summary.get('supporting_fact_mode')}",
         f"- support_labeled_rate: {fmt(summary.get('support_labeled_rate'))}",
+        f"- token_count_source_counts: {json.dumps(summary.get('token_count_source_counts',{}), ensure_ascii=False)}",
         "",
         "| " + " | ".join(headers) + " |",
         "| " + " | ".join(["---"] * len(headers)) + " |",
         "| " + " | ".join(str(x) for x in row) + " |",
+        "",
+        "## QMRAG Token Efficiency",
+        "",
+        "| avg_input_prompt_tokens | avg_completion_tokens | avg_total_llm_tokens | F1_per_1k_input_prompt_tokens | F1_per_1k_total_llm_tokens |",
+        "| ---: | ---: | ---: | ---: | ---: |",
+        "| "
+        + " | ".join(
+            [
+                fmt(summary.get("avg_input_prompt_tokens")),
+                fmt(summary.get("avg_completion_tokens")),
+                fmt(summary.get("avg_total_llm_tokens")),
+                fmt(summary.get("F1_per_1k_input_prompt_tokens")),
+                fmt(summary.get("F1_per_1k_total_llm_tokens")),
+            ]
+        )
+        + " |",
         "",
     ]
     return "\n".join(lines)

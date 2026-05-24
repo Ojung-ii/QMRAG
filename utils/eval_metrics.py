@@ -4,7 +4,7 @@ from datetime import datetime
 import json
 from typing import Any, Mapping, Sequence
 from .text import normalize_answer, token_count
-from .generation import has_idk_phrase, is_insufficient_prediction
+from .generation import build_prompt, count_tokens, extract_usage_token_counts, has_idk_phrase, is_insufficient_prediction, prompt_template_token_count
 
 def exact_match(pred: str, golds: Sequence[str]) -> float:
     p=normalize_answer(pred); return float(any(p==normalize_answer(g) for g in golds if str(g).strip()))
@@ -59,6 +59,61 @@ def context_tokens(row: Mapping[str,Any]) -> int:
     d=row.get("retrieval_diagnostics",{}) or {}
     if d.get("context_tokens") is not None: return int(d.get("context_tokens") or 0)
     return 0
+
+def _context_text(row: Mapping[str,Any]) -> str:
+    ctx=row.get("rendered_context")
+    if ctx is None:
+        ctx=row.get("rendered_context_preview","")
+    return str(ctx or "")
+
+def _first_int(*values: Any) -> int | None:
+    for value in values:
+        if value is None:
+            continue
+        try:
+            return int(value)
+        except Exception:
+            continue
+    return None
+
+def row_token_metrics(row: Mapping[str,Any]) -> dict[str,Any]:
+    prompt_profile=str(row.get("prompt_profile") or "common_qa")
+    context=_context_text(row)
+    raw_pred=str(row.get("raw_prediction", row.get("prediction", "")) or "")
+    usage_counts=extract_usage_token_counts(row.get("llm_usage"))
+    usage_prompt=_first_int(row.get("llm_usage_prompt_tokens"), usage_counts.get("prompt_tokens"))
+    usage_completion=_first_int(row.get("llm_usage_completion_tokens"), usage_counts.get("completion_tokens"))
+    usage_total=_first_int(row.get("llm_usage_total_tokens"), usage_counts.get("total_tokens"))
+    rendered=_first_int(row.get("rendered_context_tokens"), context_tokens(row))
+    template=_first_int(row.get("prompt_template_tokens"), prompt_template_token_count(prompt_profile))
+    input_prompt=_first_int(row.get("input_prompt_tokens"), usage_prompt)
+    if input_prompt is None:
+        if row.get("prompt"):
+            prompt=str(row.get("prompt") or "")
+        else:
+            try:
+                prompt=build_prompt(str(row.get("question","")), context, prompt_profile)
+            except Exception:
+                prompt=f"Question: {row.get('question','')}\nContext:\n{context}\nAnswer:"
+        input_prompt=count_tokens(prompt)
+    completion=_first_int(row.get("completion_tokens"), usage_completion)
+    if completion is None:
+        completion=count_tokens(raw_pred)
+    total=_first_int(row.get("total_llm_tokens"), usage_total)
+    if total is None:
+        total=int(input_prompt)+int(completion)
+    source=str(row.get("token_count_source") or ("usage" if usage_prompt is not None or usage_completion is not None or usage_total is not None else "approx"))
+    return {
+        "prompt_template_tokens":int(template or 0),
+        "rendered_context_tokens":int(rendered or 0),
+        "input_prompt_tokens":int(input_prompt or 0),
+        "completion_tokens":int(completion or 0),
+        "total_llm_tokens":int(total or 0),
+        "token_count_source":source,
+        "llm_usage_prompt_tokens":usage_prompt,
+        "llm_usage_completion_tokens":usage_completion,
+        "llm_usage_total_tokens":usage_total,
+    }
 
 def bridge_stats(row: Mapping[str,Any]) -> dict[str,float]:
     bundles=row.get("evidence_bundles",[]) or []
@@ -137,14 +192,18 @@ def evaluate_predictions(rows: Sequence[Mapping[str,Any]], dataset: str | None=N
         golds=[str(x) for x in r.get("answers",[])]
         ret_ms=1000*float(timings.get("total_retrieval_s",0.0)); gen_ms=1000*float(r.get("generation_latency_s",0.0))
         in_bundles=answer_in_evidence_bundles(r,golds); in_rendered=answer_in_rendered_context(r,golds); in_prediction=answer_contains(pred,golds)
-        bs=bridge_stats(r)
-        per.append({"id":r.get("id"),"em":exact_match(pred,golds),"f1":answer_f1(pred,golds),"answer_contains":in_prediction,"answer_in_context":in_bundles,"answer_in_evidence_bundles":in_bundles,"answer_in_rendered_context":in_rendered,"answer_in_prediction":in_prediction,"idk":has_idk_phrase(raw_pred),"insufficient":is_insufficient_prediction(raw_pred),"support_title_recall":support_title_recall(r),"context_tokens":context_tokens(r),"latency_ms":ret_ms+gen_ms,"retrieval_latency_ms":ret_ms,"generation_latency_ms":gen_ms,"candidate_count":int(d.get("candidate_count") or 0),"seed_count":int(d.get("seed_count") or 0),"bundle_count":int(d.get("bundle_count") or 0),"dense_enabled":bool(d.get("dense_enabled",False)),**bs})
+        bs=bridge_stats(r); tm=row_token_metrics(r)
+        per.append({"id":r.get("id"),"em":exact_match(pred,golds),"f1":answer_f1(pred,golds),"answer_contains":in_prediction,"answer_in_context":in_bundles,"answer_in_evidence_bundles":in_bundles,"answer_in_rendered_context":in_rendered,"answer_in_prediction":in_prediction,"idk":has_idk_phrase(raw_pred),"insufficient":is_insufficient_prediction(raw_pred),"support_title_recall":support_title_recall(r),"context_tokens":tm["rendered_context_tokens"],"latency_ms":ret_ms+gen_ms,"retrieval_latency_ms":ret_ms,"generation_latency_ms":gen_ms,"candidate_count":int(d.get("candidate_count") or 0),"seed_count":int(d.get("seed_count") or 0),"bundle_count":int(d.get("bundle_count") or 0),"dense_enabled":bool(d.get("dense_enabled",False)),**bs,**tm})
     avg=lambda k: sum(float(x[k]) for x in per)/max(1,len(per))
     resolved_prompt=prompt_profile or first_present(rows,"prompt_profile","UNKNOWN")
     rendering_profile=first_present(rows,"rendering_profile","structured_chain")
     prompt_experiment_type=first_present(rows,"prompt_experiment_type", "main_comparison" if resolved_prompt=="common_qa" else "ablation" if resolved_prompt in {"qmrag_bundle_qa","qmrag_bundle_light","qmrag_bundle_tiny"} else "unknown")
     res={"dataset":dataset or first_present(rows,"dataset","UNKNOWN"),"prompt_profile":resolved_prompt,"rendering_profile":rendering_profile,"prompt_experiment_type":prompt_experiment_type,"generation_provider":first_present(rows,"generation_provider",first_present(rows,"llm_provider","UNKNOWN")),"created_at":datetime.now().isoformat(timespec="seconds"),"n":len(rows),"em":avg("em"),"f1":avg("f1"),"answer_contains":avg("answer_contains"),"support_title_recall":avg("support_title_recall"),"context_tokens":avg("context_tokens"),"latency_ms":avg("latency_ms"),"retrieval_latency_ms":avg("retrieval_latency_ms"),"generation_latency_ms":avg("generation_latency_ms"),"candidate_count":avg("candidate_count"),"seed_count":avg("seed_count"),"bundle_count":avg("bundle_count"),"dense_enabled_rate":sum(1.0 if x["dense_enabled"] else 0.0 for x in per)/max(1,len(per)),"answer_in_context":avg("answer_in_context"),"answer_in_evidence_bundles":avg("answer_in_evidence_bundles"),"answer_in_rendered_context":avg("answer_in_rendered_context"),"answer_in_prediction":avg("answer_in_prediction"),"idk_rate":sum(1.0 if x["idk"] else 0.0 for x in per)/max(1,len(per)),"insufficient_rate":sum(1.0 if x["insufficient"] else 0.0 for x in per)/max(1,len(per)),"avg_bridge_title_count":avg("bridge_title_count"),"avg_bridge_bundle_count":avg("bridge_bundle_count"),"chain_complete_rate":sum(1.0 if x["has_chain_complete"] else 0.0 for x in per)/max(1,len(per)),"bridge_connected_rate":sum(1.0 if x["has_bridge_connected"] else 0.0 for x in per)/max(1,len(per)),"answer_slot_aligned_rate":sum(1.0 if x["has_answer_slot_aligned"] else 0.0 for x in per)/max(1,len(per)),"chain_complete_v2_rate":sum(1.0 if x["has_chain_complete_v2"] else 0.0 for x in per)/max(1,len(per)),"anchor_connected_chain_complete_rate":sum(1.0 if x["has_anchor_connected_chain_complete"] else 0.0 for x in per)/max(1,len(per)),"anchor_mismatch_chain_rate":sum(1.0 if x["has_anchor_mismatch_chain"] else 0.0 for x in per)/max(1,len(per)),"multi_anchor_bundle_rate":sum(1.0 if x["has_multi_anchor_bundle"] else 0.0 for x in per)/max(1,len(per)),"generic_relation_top1_rate":avg("generic_relation_top1"),"query_anchor_coverage_rate":avg("query_anchor_coverage"),"avg_residual_coverage_count":avg("avg_residual_coverage_count"),"per_example":per}
+    res.update({"avg_prompt_template_tokens":avg("prompt_template_tokens"),"avg_rendered_context_tokens":avg("rendered_context_tokens"),"avg_input_prompt_tokens":avg("input_prompt_tokens"),"avg_completion_tokens":avg("completion_tokens"),"avg_total_llm_tokens":avg("total_llm_tokens"),"token_count_source_counts":dict(Counter(str(x.get("token_count_source","unknown")) for x in per))})
     res["support_recall_per_1k_tokens"]=res["support_title_recall"]/max(1e-9,res["context_tokens"]/1000.0)
+    res["F1_per_1k_context_tokens"]=res["f1"]/max(1e-9,res["avg_rendered_context_tokens"]/1000.0)
+    res["F1_per_1k_input_prompt_tokens"]=res["f1"]/max(1e-9,res["avg_input_prompt_tokens"]/1000.0)
+    res["F1_per_1k_total_llm_tokens"]=res["f1"]/max(1e-9,res["avg_total_llm_tokens"]/1000.0)
     res.update({"EM":res["em"],"F1":res["f1"],"AnsContains":res["answer_contains"],"SupportRecall":res["support_title_recall"],"SR/1kTok":res["support_recall_per_1k_tokens"],"CtxTok":res["context_tokens"],"LatencyMs":res["latency_ms"],"DenseRate":res["dense_enabled_rate"]})
     return res
 def summary_markdown(dataset: str, result: Mapping[str,Any]) -> str:
@@ -157,5 +216,5 @@ def summary_markdown(dataset: str, result: Mapping[str,Any]) -> str:
         meta.append(("index_source",result.get("index_source")))
     if result.get("index_dir") is not None:
         meta.append(("index_dir",result.get("index_dir")))
-    rows=meta+[("EM",f"{result.get('em',0):.4f}"),("F1",f"{result.get('f1',0):.4f}"),("AnsContains",f"{result.get('answer_contains',0):.4f}"),("SupportRecall",f"{result.get('support_title_recall',0):.4f}"),("SR/1kTok",f"{result.get('support_recall_per_1k_tokens',0):.4f}"),("CtxTok",f"{result.get('context_tokens',0):.1f}"),("LatencyMs",f"{result.get('latency_ms',0):.1f}"),("DenseRate",f"{result.get('dense_enabled_rate',0):.2f}"),("AvgBridgeTitleCount",f"{result.get('avg_bridge_title_count',0):.2f}"),("AvgBridgeBundleCount",f"{result.get('avg_bridge_bundle_count',0):.2f}"),("BridgeConnectedRate",f"{result.get('bridge_connected_rate',0):.4f}"),("AnswerSlotAlignedRate",f"{result.get('answer_slot_aligned_rate',0):.4f}"),("ChainCompleteV2Rate",f"{result.get('chain_complete_v2_rate',0):.4f}"),("AnchorConnectedChainCompleteRate",f"{result.get('anchor_connected_chain_complete_rate',0):.4f}"),("AnchorMismatchChainRate",f"{result.get('anchor_mismatch_chain_rate',0):.4f}"),("MultiAnchorBundleRate",f"{result.get('multi_anchor_bundle_rate',0):.4f}"),("GenericRelationTop1Rate",f"{result.get('generic_relation_top1_rate',0):.4f}"),("QueryAnchorCoverageRate",f"{result.get('query_anchor_coverage_rate',0):.4f}"),("AvgResidualCoverage",f"{result.get('avg_residual_coverage_count',0):.2f}"),("ChainCompleteRate",f"{result.get('chain_complete_rate',0):.4f}"),("AnswerInEvidenceBundles",f"{result.get('answer_in_evidence_bundles',result.get('answer_in_context',0)):.4f}"),("AnswerInRenderedContext",f"{result.get('answer_in_rendered_context',0):.4f}"),("AnswerInPrediction",f"{result.get('answer_in_prediction',0):.4f}"),("IDKRate",f"{result.get('idk_rate',0):.4f}"),("InsufficientRate",f"{result.get('insufficient_rate',0):.4f}")]
+    rows=meta+[("EM",f"{result.get('em',0):.4f}"),("F1",f"{result.get('f1',0):.4f}"),("AnsContains",f"{result.get('answer_contains',0):.4f}"),("SupportRecall",f"{result.get('support_title_recall',0):.4f}"),("SR/1kTok",f"{result.get('support_recall_per_1k_tokens',0):.4f}"),("CtxTok",f"{result.get('context_tokens',0):.1f}"),("PromptTemplateTok",f"{result.get('avg_prompt_template_tokens',0):.1f}"),("InputPromptTok",f"{result.get('avg_input_prompt_tokens',0):.1f}"),("CompletionTok",f"{result.get('avg_completion_tokens',0):.1f}"),("TotalLLMTok",f"{result.get('avg_total_llm_tokens',0):.1f}"),("F1/1kContextTok",f"{result.get('F1_per_1k_context_tokens',0):.4f}"),("F1/1kInputTok",f"{result.get('F1_per_1k_input_prompt_tokens',0):.4f}"),("F1/1kTotalLLMTok",f"{result.get('F1_per_1k_total_llm_tokens',0):.4f}"),("TokenCountSources",json.dumps(result.get('token_count_source_counts',{}),ensure_ascii=False)),("LatencyMs",f"{result.get('latency_ms',0):.1f}"),("DenseRate",f"{result.get('dense_enabled_rate',0):.2f}"),("AvgBridgeTitleCount",f"{result.get('avg_bridge_title_count',0):.2f}"),("AvgBridgeBundleCount",f"{result.get('avg_bridge_bundle_count',0):.2f}"),("BridgeConnectedRate",f"{result.get('bridge_connected_rate',0):.4f}"),("AnswerSlotAlignedRate",f"{result.get('answer_slot_aligned_rate',0):.4f}"),("ChainCompleteV2Rate",f"{result.get('chain_complete_v2_rate',0):.4f}"),("AnchorConnectedChainCompleteRate",f"{result.get('anchor_connected_chain_complete_rate',0):.4f}"),("AnchorMismatchChainRate",f"{result.get('anchor_mismatch_chain_rate',0):.4f}"),("MultiAnchorBundleRate",f"{result.get('multi_anchor_bundle_rate',0):.4f}"),("GenericRelationTop1Rate",f"{result.get('generic_relation_top1_rate',0):.4f}"),("QueryAnchorCoverageRate",f"{result.get('query_anchor_coverage_rate',0):.4f}"),("AvgResidualCoverage",f"{result.get('avg_residual_coverage_count',0):.2f}"),("ChainCompleteRate",f"{result.get('chain_complete_rate',0):.4f}"),("AnswerInEvidenceBundles",f"{result.get('answer_in_evidence_bundles',result.get('answer_in_context',0)):.4f}"),("AnswerInRenderedContext",f"{result.get('answer_in_rendered_context',0):.4f}"),("AnswerInPrediction",f"{result.get('answer_in_prediction',0):.4f}"),("IDKRate",f"{result.get('idk_rate',0):.4f}"),("InsufficientRate",f"{result.get('insufficient_rate',0):.4f}")]
     return "\n".join(header+["| metric | value |","|---|---:|"]+[f"| {k} | {v} |" for k,v in rows])+"\n"

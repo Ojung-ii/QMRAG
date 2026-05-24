@@ -69,6 +69,10 @@ generation:
   max_context_chars: 12000
   prompt_profile: common_qa
   rendering_profile: structured_chain
+  token_counting:
+    enabled: true
+    tokenizer_model: auto
+    fallback_to_estimate: true
 
 eval:
   metrics: [em, f1, answer_contains, support_title_recall, context_tokens, latency_ms]

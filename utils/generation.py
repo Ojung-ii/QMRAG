@@ -81,6 +81,128 @@ IDK_PHRASES = (
     "i do not know",
 )
 
+_TOKENIZER_CACHE: dict[tuple[str, bool, bool], Any] = {}
+
+def count_tokens(text: str, tokenizer: Any = None) -> int:
+    if tokenizer is not None:
+        try:
+            return len(tokenizer.encode(str(text or ""), add_special_tokens=False))
+        except TypeError:
+            return len(tokenizer.encode(str(text or "")))
+        except Exception:
+            pass
+    return token_count(str(text or ""))
+
+def _token_counting_cfg(cfg: Mapping[str,Any] | None) -> Mapping[str,Any]:
+    tc=(cfg or {}).get("token_counting",{}) if cfg else {}
+    return tc if isinstance(tc,Mapping) else {}
+
+def _tokenizer_model_from_cfg(cfg: Mapping[str,Any] | None, model: Any = None) -> str | None:
+    tc=_token_counting_cfg(cfg)
+    requested=str(tc.get("tokenizer_model","auto") or "auto")
+    if requested.lower()!="auto":
+        return requested
+    for candidate in (model, (cfg or {}).get("model") if cfg else None):
+        value=str(candidate or "").strip()
+        if value and value.lower()!="auto":
+            return value
+    return None
+
+def _load_counting_tokenizer(cfg: Mapping[str,Any] | None, model: Any = None) -> tuple[Any | None, str]:
+    tc=_token_counting_cfg(cfg)
+    if tc and not bool(tc.get("enabled",True)):
+        return None,"approx"
+    tokenizer_model=_tokenizer_model_from_cfg(cfg,model)
+    if not tokenizer_model:
+        return None,"approx"
+    local_files_only=bool(tc.get("local_files_only",True))
+    trust_remote_code=bool(tc.get("trust_remote_code",True))
+    key=(tokenizer_model,local_files_only,trust_remote_code)
+    if key in _TOKENIZER_CACHE:
+        return _TOKENIZER_CACHE[key],"tokenizer"
+    try:
+        from transformers import AutoTokenizer
+        tokenizer=AutoTokenizer.from_pretrained(
+            tokenizer_model,
+            trust_remote_code=trust_remote_code,
+            local_files_only=local_files_only,
+        )
+        _TOKENIZER_CACHE[key]=tokenizer
+        return tokenizer,"tokenizer"
+    except Exception:
+        if tc and not bool(tc.get("fallback_to_estimate",True)):
+            raise
+        return None,"approx"
+
+def prompt_template_token_count(prompt_profile: str, tokenizer: Any = None) -> int:
+    profile=str(prompt_profile or DEFAULT_PROMPT_PROFILE)
+    if profile not in PROMPT_TEMPLATES:
+        profile=DEFAULT_PROMPT_PROFILE
+    return count_tokens(PROMPT_TEMPLATES[profile].format(question="", context=""), tokenizer)
+
+def extract_usage_token_counts(usage: Any) -> dict[str,int | None]:
+    if usage is None:
+        usage_dict={}
+    elif isinstance(usage,Mapping):
+        usage_dict=dict(usage)
+    elif hasattr(usage,"model_dump"):
+        usage_dict=usage.model_dump()
+    else:
+        usage_dict={k:getattr(usage,k) for k in ("prompt_tokens","completion_tokens","total_tokens") if hasattr(usage,k)}
+    def get_int(*keys: str) -> int | None:
+        for key in keys:
+            value=usage_dict.get(key)
+            if value is not None:
+                try:
+                    return int(value)
+                except Exception:
+                    return None
+        return None
+    return {
+        "prompt_tokens":get_int("prompt_tokens","input_tokens"),
+        "completion_tokens":get_int("completion_tokens","output_tokens"),
+        "total_tokens":get_int("total_tokens"),
+    }
+
+def llm_input_text(prompt: str, cfg: Mapping[str,Any] | None = None) -> str:
+    system_message=(cfg or {}).get("system_message") if cfg else None
+    if system_message is None and cfg:
+        system_message=cfg.get("system_prompt")
+    if system_message:
+        return f"{system_message}\n{prompt}"
+    return str(prompt or "")
+
+def add_token_accounting_fields(
+    row: Dict[str,Any],
+    prompt: str,
+    rendered_context: str,
+    raw_prediction: Any,
+    prompt_profile: str,
+    cfg: Mapping[str,Any] | None = None,
+    usage: Any = None,
+    model: Any = None,
+) -> Dict[str,Any]:
+    usage_counts=extract_usage_token_counts(usage)
+    tokenizer,counter_source=_load_counting_tokenizer(cfg,model)
+    usage_prompt=usage_counts.get("prompt_tokens")
+    usage_completion=usage_counts.get("completion_tokens")
+    usage_total=usage_counts.get("total_tokens")
+    input_prompt_tokens=usage_prompt if usage_prompt is not None else count_tokens(llm_input_text(prompt,cfg),tokenizer)
+    completion_tokens=usage_completion if usage_completion is not None else count_tokens(str(raw_prediction or ""),tokenizer)
+    total_llm_tokens=usage_total if usage_total is not None else int(input_prompt_tokens)+int(completion_tokens)
+    row.update({
+        "prompt_template_tokens":prompt_template_token_count(prompt_profile,tokenizer),
+        "rendered_context_tokens":count_tokens(rendered_context,tokenizer),
+        "input_prompt_tokens":int(input_prompt_tokens),
+        "completion_tokens":int(completion_tokens),
+        "total_llm_tokens":int(total_llm_tokens),
+        "token_count_source":"usage" if usage_prompt is not None or usage_completion is not None or usage_total is not None else counter_source,
+        "llm_usage_prompt_tokens":usage_prompt,
+        "llm_usage_completion_tokens":usage_completion,
+        "llm_usage_total_tokens":usage_total,
+    })
+    return row
+
 def _ordered_bundles(bundles: Sequence[Mapping[str,Any]]) -> list[Mapping[str,Any]]:
     order_rank={"anchor_connected_chain_complete":0,"multi_anchor":1,"anchor":2,"chain_complete_v2":3,"bridge_connected":4,"same_title":5,"generic_relation":6,"fallback":7,"complete_bridge_chain":3,"exact_query_anchor":2,"bridge_candidate":4}
     return [

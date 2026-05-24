@@ -100,8 +100,16 @@ def summarize_run(path: Path, dataset: str, prompt_profile: str) -> dict[str, An
         "avg_context_tokens": result.get("context_tokens", 0.0),
         "avg_generation_ms": result.get("generation_latency_ms", 0.0),
         "avg_total_ms": result.get("latency_ms", 0.0),
-        "avg_prompt_template_tokens": prompt_template_tokens(prompt_profile),
-        "avg_prompt_total_tokens": avg_prompt_total_tokens(rows, prompt_profile),
+        "prompt_template_tokens": result.get("avg_prompt_template_tokens", prompt_template_tokens(prompt_profile)),
+        "avg_prompt_template_tokens": result.get("avg_prompt_template_tokens", prompt_template_tokens(prompt_profile)),
+        "avg_input_prompt_tokens": result.get("avg_input_prompt_tokens", avg_prompt_total_tokens(rows, prompt_profile)),
+        "avg_completion_tokens": result.get("avg_completion_tokens", 0.0),
+        "avg_total_llm_tokens": result.get("avg_total_llm_tokens", 0.0),
+        "avg_prompt_total_tokens": result.get("avg_input_prompt_tokens", avg_prompt_total_tokens(rows, prompt_profile)),
+        "F1_per_1k_context_tokens": result.get("F1_per_1k_context_tokens", 0.0),
+        "F1_per_1k_input_prompt_tokens": result.get("F1_per_1k_input_prompt_tokens", 0.0),
+        "F1_per_1k_total_llm_tokens": result.get("F1_per_1k_total_llm_tokens", 0.0),
+        "token_count_source_counts": result.get("token_count_source_counts", {}),
     }
 
 
@@ -111,10 +119,16 @@ def add_deltas(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     full = by_prompt.get("qmrag_bundle_qa")
     common_f1 = float(common.get("F1", 0.0)) if common else 0.0
     common_ins = float(common.get("insufficient_rate", 0.0)) if common else 0.0
+    common_input = float(common.get("avg_input_prompt_tokens", 0.0)) if common else 0.0
+    common_template = float(common.get("prompt_template_tokens", 0.0)) if common else 0.0
+    common_generation_ms = float(common.get("avg_generation_ms", 0.0)) if common else 0.0
     full_gain = (float(full.get("F1", 0.0)) - common_f1) if full else 0.0
     for row in rows:
         row["delta_F1_vs_common"] = float(row.get("F1", 0.0)) - common_f1
         row["delta_insufficient_vs_common"] = float(row.get("insufficient_rate", 0.0)) - common_ins
+        row["delta_input_tokens_vs_common"] = float(row.get("avg_input_prompt_tokens", 0.0)) - common_input
+        row["delta_template_tokens_vs_common"] = float(row.get("prompt_template_tokens", 0.0)) - common_template
+        row["delta_generation_ms_vs_common"] = float(row.get("avg_generation_ms", 0.0)) - common_generation_ms
         if row["prompt_profile"] == "common_qa":
             row["retained_gain_vs_full"] = None
         elif abs(full_gain) < 1e-12:
@@ -144,15 +158,34 @@ def markdown_table(dataset: str, rows: list[Mapping[str, Any]]) -> str:
         "avg_context_tokens",
         "avg_generation_ms",
         "avg_total_ms",
-        "avg_prompt_template_tokens",
-        "avg_prompt_total_tokens",
+        "prompt_template_tokens",
+        "avg_input_prompt_tokens",
+        "avg_completion_tokens",
+        "avg_total_llm_tokens",
+        "F1_per_1k_context_tokens",
+        "F1_per_1k_input_prompt_tokens",
+        "F1_per_1k_total_llm_tokens",
         "delta_F1_vs_common",
         "delta_insufficient_vs_common",
+        "delta_input_tokens_vs_common",
+        "delta_template_tokens_vs_common",
+        "delta_generation_ms_vs_common",
         "retained_gain_vs_full",
     ]
     lines = ["# Prompt Efficiency", "", f"- dataset: {dataset}", "", "| " + " | ".join(headers) + " |", "| " + " | ".join(["---"] * len(headers)) + " |"]
     for row in rows:
         lines.append("| " + " | ".join(fmt(row.get(h)) for h in headers) + " |")
+    common = next((r for r in rows if r.get("prompt_profile") == "common_qa"), None)
+    full = next((r for r in rows if r.get("prompt_profile") == "qmrag_bundle_qa"), None)
+    lines.extend(["", "## Token Efficiency Notes", ""])
+    if common and full:
+        lines.append(f"- full_prompt_delta_F1_vs_common: {fmt(float(full.get('F1',0.0))-float(common.get('F1',0.0)))}")
+        lines.append(f"- full_prompt_delta_input_tokens_vs_common: {fmt(float(full.get('avg_input_prompt_tokens',0.0))-float(common.get('avg_input_prompt_tokens',0.0)))}")
+        lines.append(f"- full_prompt_F1_per_1k_input_tokens: {fmt(full.get('F1_per_1k_input_prompt_tokens'))}")
+    for profile in ("qmrag_bundle_tiny","qmrag_bundle_light"):
+        row = next((r for r in rows if r.get("prompt_profile") == profile), None)
+        if row:
+            lines.append(f"- {profile}: retained_gain_vs_full={fmt(row.get('retained_gain_vs_full'))}, delta_input_tokens={fmt(row.get('delta_input_tokens_vs_common'))}, F1_per_1k_input_tokens={fmt(row.get('F1_per_1k_input_prompt_tokens'))}")
     return "\n".join(lines) + "\n"
 
 
