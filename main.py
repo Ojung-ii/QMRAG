@@ -203,7 +203,7 @@ def prompt_experiment_type(prompt_profile: str, rendering_profile: str | None = 
         return "rendering_ablation"
     if prompt_profile=="common_qa":
         return "main_comparison"
-    if prompt_profile=="qmrag_bundle_qa":
+    if prompt_profile in {"qmrag_bundle_qa","qmrag_bundle_light","qmrag_bundle_tiny"}:
         return "ablation"
     return "unknown"
 

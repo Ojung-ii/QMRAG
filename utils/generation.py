@@ -42,6 +42,31 @@ Question: {question}
 Context:
 {context}
 Answer:""",
+    "qmrag_bundle_light": """You are a QA assistant.
+Answer the question using only the provided Context.
+The Context may contain Evidence Chains and Multi-Anchor Evidence.
+For Evidence Chains, follow the Anchor → Bridge → answer evidence.
+For Multi-Anchor Evidence, compare only the listed anchors.
+Return only the final short answer.
+Do not output reasoning, explanations, citations, Markdown, or prefixes.
+For yes/no questions, output exactly yes or no in lowercase.
+If the answer cannot be found in the Context, output exactly: insufficient information
+
+Question: {question}
+Context:
+{context}
+Answer:""",
+    "qmrag_bundle_tiny": """You are a QA assistant.
+Use only the Context.
+If an Evidence Chain is given, follow Anchor → Bridge → answer evidence.
+If Multi-Anchor Evidence is given, compare the listed anchors.
+Return only the final short answer.
+If unavailable, output exactly: insufficient information
+
+Question: {question}
+Context:
+{context}
+Answer:""",
 }
 
 INSUFFICIENT_PHRASES = (

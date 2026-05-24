@@ -14,7 +14,16 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.analyze_failures import FAILURE_CATEGORIES, classify_example, find_latest_prediction, infer_dataset, infer_prompt, infer_rendering
+from scripts.analyze_failures import (
+    FAILURE_CATEGORIES,
+    classify_example,
+    find_latest_prediction,
+    infer_dataset,
+    infer_prompt,
+    infer_rendering,
+    iter_prediction_files,
+    summarize_prediction_file,
+)
 from utils.eval_metrics import evaluate_predictions, summary_markdown
 from utils.generation import DEFAULT_RENDERING_PROFILE, PROMPT_TEMPLATES, RENDERING_PROFILES, build_prompt, normalize_prediction_for_eval, render_context
 from utils.io_utils import dump_json, load_yaml, read_jsonl, write_jsonl
@@ -40,10 +49,37 @@ def json_hash(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
 
+def find_latest_prediction_with_rendering(
+    output_root: Path,
+    dataset: str | None,
+    prompt_profile: str | None,
+    rendering_profile: str | None,
+) -> Path:
+    candidates = []
+    for path in iter_prediction_files(output_root):
+        try:
+            summary = summarize_prediction_file(path)
+        except Exception:
+            continue
+        if dataset and summary["dataset"] != dataset:
+            continue
+        if prompt_profile and summary["prompt_profile"] != prompt_profile:
+            continue
+        if rendering_profile and summary["rendering_profile"] != rendering_profile:
+            continue
+        if int(summary["n"]) <= 0:
+            continue
+        candidates.append(summary)
+    if not candidates:
+        filters = f"dataset={dataset!r} prompt_profile={prompt_profile!r} rendering_profile={rendering_profile!r}"
+        raise SystemExit(f"No matching predictions.jsonl found for {filters}")
+    return max(candidates, key=lambda x: (float(x["mtime"]), str(x["path"])))["path"]
+
+
 def prompt_experiment_type(source_prompt: str, target_prompt: str, rendering_changed: bool) -> str:
     if rendering_changed:
         return "rendering_replay"
-    if target_prompt != source_prompt or target_prompt == "qmrag_bundle_qa":
+    if target_prompt != source_prompt or target_prompt in {"qmrag_bundle_qa", "qmrag_bundle_light", "qmrag_bundle_tiny"}:
         return "replay_ablation"
     return "replay"
 
@@ -200,6 +236,7 @@ def main() -> None:
     parser.add_argument("--predictions", default=None)
     parser.add_argument("--dataset", default=None)
     parser.add_argument("--source-prompt", default=None)
+    parser.add_argument("--source-rendering-profile", default=None)
     parser.add_argument("--target-prompt", "--prompt-profile", dest="prompt_profile", default=None)
     parser.add_argument("--rendering-profile", choices=sorted(RENDERING_PROFILES), default=None)
     parser.add_argument("--failure-category", choices=FAILURE_CATEGORIES, default=None)
@@ -223,6 +260,13 @@ def main() -> None:
         raise SystemExit(f"Unsupported target prompt {target_prompt!r}; choices={sorted(PROMPT_TEMPLATES)}")
     if args.predictions:
         pred_path = Path(args.predictions)
+    elif args.source_rendering_profile:
+        pred_path = find_latest_prediction_with_rendering(
+            Path(args.search_output_root),
+            args.dataset,
+            args.source_prompt,
+            args.source_rendering_profile,
+        )
     else:
         pred_path = find_latest_prediction(Path(args.search_output_root), args.dataset, args.source_prompt)
     rows = read_jsonl(pred_path)
