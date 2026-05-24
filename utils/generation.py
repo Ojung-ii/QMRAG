@@ -24,6 +24,9 @@ COMPACTION_PROFILES = (
     "sentence_cap_no_sources",
     "top3_chain_dedup_no_sources",
     "chain_skeleton_no_sources",
+    "metadata_only_compact",
+    "chain_dedup_keep_sources",
+    "source_light_compact",
 )
 
 PROMPT_TEMPLATES = {
@@ -599,6 +602,67 @@ def _source_refs(bundle: Mapping[str,Any]) -> str:
             refs.append(f"{title} | {chunk_id}".strip(" |"))
     return "; ".join(dict.fromkeys(refs))
 
+def _append_source_chunks_no_metadata(
+    parts: list[str],
+    seen: set[str],
+    bundle: Mapping[str,Any],
+    sentence_limit_per_chunk: int | None = None,
+) -> int:
+    appended=0
+    for chunk in bundle.get("source_chunks",[]) or []:
+        title=str(chunk.get("title") or bundle.get("anchor_title") or "").strip()
+        text=str(chunk.get("text") or "").strip()
+        if not text:
+            continue
+        texts=[text]
+        if sentence_limit_per_chunk is not None:
+            texts=sentence_split(text)[:max(1,int(sentence_limit_per_chunk or 1))]
+        for sent in texts:
+            rec=_record(title,sent,"source",5,chunk.get("chunk_id"))
+            if rec and _append_record(parts,seen,rec):
+                appended+=1
+    return appended
+
+def _render_metadata_only_compact(bundles: Sequence[Mapping[str,Any]], max_chars: int) -> str:
+    parts=[]
+    for i,bundle in enumerate(_ordered_bundles(bundles), start=1):
+        seen:set[str]=set()
+        if bundle.get("bundle_type")=="multi_anchor":
+            anchors="; ".join(str(x) for x in bundle.get("anchor_titles",[]) or [])
+            parts.append(f"Multi-Anchor Evidence {i}: {anchors}" if anchors else f"Multi-Anchor Evidence {i}:")
+            for rec in _prop_records(bundle):
+                _append_record(parts,seen,rec)
+            if bundle.get("source_chunks"):
+                parts.append("Sources:")
+                _append_source_chunks_no_metadata(parts,seen,bundle,sentence_limit_per_chunk=None)
+            parts.append("")
+            continue
+        bridge=", ".join(str(x) for x in bundle.get("bridge_titles",[]) or [])
+        chain=_chain_records(bundle)
+        if chain:
+            anchor=str(bundle.get("anchor_title") or "").strip()
+            parts.append(f"Evidence Chain {i}: {anchor}" if anchor else f"Evidence Chain {i}:")
+            if bridge:
+                parts.append(f"Bridge: {bridge}")
+            parts.append("Chain:")
+            for rec in chain:
+                _append_record(parts,seen,rec)
+            support=_prop_records(bundle,{r.get("norm","") for r in chain})
+            if support:
+                parts.append("Supporting Evidence:")
+                for rec in support:
+                    _append_record(parts,seen,rec)
+        else:
+            anchor=str(bundle.get("anchor_title") or bundle.get("title") or "").strip()
+            parts.append(f"Supporting Evidence {i}: {anchor}" if anchor else f"Supporting Evidence {i}:")
+            for rec in _prop_records(bundle):
+                _append_record(parts,seen,rec)
+        if bundle.get("source_chunks"):
+            parts.append("Sources:")
+            _append_source_chunks_no_metadata(parts,seen,bundle,sentence_limit_per_chunk=None)
+        parts.append("")
+    return safe_truncate("\n".join(parts).strip(), max_chars)
+
 def _render_chain_dedup(bundles: Sequence[Mapping[str,Any]], max_chars: int) -> str:
     parts=[]
     seen:set[str]=set()
@@ -639,6 +703,45 @@ def _render_chain_dedup(bundles: Sequence[Mapping[str,Any]], max_chars: int) -> 
         refs=_source_refs(bundle)
         if refs:
             parts.append(f"Sources: {refs}")
+        parts.append("")
+    return safe_truncate("\n".join(parts).strip(), max_chars)
+
+def _render_chain_dedup_keep_sources(
+    bundles: Sequence[Mapping[str,Any]],
+    max_chars: int,
+    source_sentence_limit_per_chunk: int | None = None,
+) -> str:
+    parts=[]
+    seen:set[str]=set()
+    for i,bundle in enumerate(_ordered_bundles(bundles), start=1):
+        if bundle.get("bundle_type")=="multi_anchor":
+            _render_multi_anchor_no_sources(parts,seen,bundle,i,per_anchor_limit=None)
+        else:
+            bridge=", ".join(str(x) for x in bundle.get("bridge_titles",[]) or [])
+            chain=_chain_records(bundle)
+            if chain:
+                anchor=str(bundle.get("anchor_title") or "").strip()
+                parts.append(f"Evidence Chain {i}: {anchor}" if anchor else f"Evidence Chain {i}:")
+                if bridge:
+                    parts.append(f"Bridge: {bridge}")
+                parts.append("Chain:")
+                for rec in chain:
+                    _append_record(parts,seen,rec)
+                support=_support_records_for_compact(bundle,chain,limit=None)
+                if support:
+                    parts.append("Supporting Evidence:")
+                    for rec in support:
+                        _append_record(parts,seen,rec)
+            else:
+                support=_support_records_for_compact(bundle,[],limit=None)
+                if support:
+                    anchor=str(bundle.get("anchor_title") or bundle.get("title") or "").strip()
+                    parts.append(f"Supporting Evidence {i}: {anchor}" if anchor else f"Supporting Evidence {i}:")
+                    for rec in support:
+                        _append_record(parts,seen,rec)
+        if bundle.get("source_chunks"):
+            parts.append("Sources:")
+            _append_source_chunks_no_metadata(parts,seen,bundle,sentence_limit_per_chunk=source_sentence_limit_per_chunk)
         parts.append("")
     return safe_truncate("\n".join(parts).strip(), max_chars)
 
@@ -847,10 +950,16 @@ def _render_compacted_context(
     max_sentences_per_bundle: int = 3,
 ) -> str:
     profile=str(compaction_profile or "none")
+    if profile=="metadata_only_compact":
+        return _render_metadata_only_compact(bundles,max_chars)
     if profile=="chain_dedup":
         return _render_chain_dedup(bundles,max_chars)
     if profile=="chain_dedup_no_sources":
         return _render_chain_dedup_no_sources(bundles,max_chars,support_limit=None)
+    if profile=="chain_dedup_keep_sources":
+        return _render_chain_dedup_keep_sources(bundles,max_chars,source_sentence_limit_per_chunk=None)
+    if profile=="source_light_compact":
+        return _render_chain_dedup_keep_sources(bundles,max_chars,source_sentence_limit_per_chunk=1)
     if profile=="chain_skeleton":
         return _render_chain_skeleton(bundles,max_chars,include_plus_one=False)
     if profile=="chain_skeleton_no_sources":
@@ -925,7 +1034,7 @@ def render_context_with_metadata(
         "dropped_sentence_count":max(0,int(original_stats.get("rendered_sentence_count",0) or 0)-int(rendered_stats.get("rendered_sentence_count",0) or 0)),
         "duplicate_removed_count":max(0,int(original_stats.get("duplicate_sentence_count",0) or 0)-int(rendered_stats.get("duplicate_sentence_count",0) or 0)),
         "source_removed_count":int(original_stats.get("source_sentence_count",0) or 0) if no_sources else 0,
-        "metadata_removed_count":_metadata_removed_count(evidence_bundles) if no_sources else 0,
+        "metadata_removed_count":_metadata_removed_count(evidence_bundles) if compact!="none" else 0,
         "compaction_profile":compact,
         "max_sentences_per_bundle":int(max_sentences_per_bundle or 3),
     })
