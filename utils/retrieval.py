@@ -11,6 +11,8 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+import numpy as np
+
 from .embedding import DenseIndex, encode_query
 from .io_utils import read_jsonl
 try:
@@ -39,6 +41,15 @@ COMPARISON_TERMS={
     "first","earlier","older","same","both","larger","smaller","higher",
     "lower","when","which","before","after","oldest","youngest","largest",
     "smallest","earliest","latest",
+}
+
+RESIDUAL_SELECTION_VARIANTS={
+    "residual_lexical",
+    "bridge_fullquery",
+    "residual_dense_only",
+    "residual_hybrid_lex_first",
+    "residual_dense_fallback",
+    "residual_unified_alignment",
 }
 
 ANSWER_SLOT_TERMS={
@@ -299,6 +310,15 @@ class QueryMedoidRetriever:
         self.seed_selection_variant = str(cfg.get("seed_selection_variant", "medoid_current") or "medoid_current")
         if self.seed_selection_variant not in {"medoid_current", "top_relevance", "anchor_first", "chain_potential"}:
             raise ValueError(f"Unsupported seed_selection_variant={self.seed_selection_variant!r}")
+        self.bridge_cfg=dict(cfg.get("bridge",{}) or {})
+        self.residual_selection_variant = str(
+            cfg.get("residual_selection")
+            or self.bridge_cfg.get("residual_selection")
+            or self.bridge_cfg.get("selection", "residual_lexical")
+            or "residual_lexical"
+        )
+        if self.residual_selection_variant not in RESIDUAL_SELECTION_VARIANTS:
+            raise ValueError(f"Unsupported residual_selection={self.residual_selection_variant!r}")
         self.dense_indexes = dict(dense_indexes or {}) if isinstance(dense_indexes, Mapping) else {}
         self.index_dir = Path(dense_indexes) if dense_indexes is not None and not isinstance(dense_indexes, Mapping) else None
         self._dense_prop_matrix = None
@@ -317,6 +337,13 @@ class QueryMedoidRetriever:
         self.entity_by_title = {str(e["title"]).lower(): e for e in self.entities}
         self.chunk_by_id = {c["chunk_id"]: c for c in self.chunks}
         self.prop_by_id = {p["prop_id"]: p for p in self.props}
+        self.prop_dense_pos = {str(p.get("prop_id")): i for i,p in enumerate(self.props)}
+        self.legacy_dense_prop_pos: Dict[str,int] = {}
+        if "proposition" in self.dense_indexes:
+            try:
+                self.legacy_dense_prop_pos = {str(pid): i for i,pid in enumerate(self.dense_indexes["proposition"].ids)}
+            except Exception:
+                self.legacy_dense_prop_pos = {}
         self.props_by_title: Dict[str, List[Mapping[str, Any]]] = defaultdict(list)
         self.chunks_by_title: Dict[str, List[Mapping[str, Any]]] = defaultdict(list)
         for p in self.props:
@@ -328,7 +355,6 @@ class QueryMedoidRetriever:
         self.chunk_bm25 = BM25Index(self.chunks, k1=float(bm25_cfg.get("k1", 1.5)), b=float(bm25_cfg.get("b", 0.75)))
         self.rng = random.Random(int(cfg.get("random_seed", 13)))
         self._embed_cache: Dict[str, Any] = {}
-        self.bridge_cfg=dict(cfg.get("bridge",{}) or {})
         raw_index_dir=index.get("index_dir") or (index.get("meta",{}) or {}).get("index_dir")
         self.bridge_index_dir=Path(raw_index_dir) if raw_index_dir else None
         self.bridge_requested=bool(self.bridge_cfg.get("enabled",False))
@@ -362,8 +388,11 @@ class QueryMedoidRetriever:
         self._pairwise_similarity_cache: Dict[Tuple[str, str], float] = {}
         self._bridge_title_lookup_cache: Dict[Tuple[str, str], List[Mapping[str, Any]]] = {}
         self._bridge_prop_score_cache: Dict[Tuple[str, Tuple[str, ...]], float] = {}
-        self._bridge_rank_cache: Dict[Tuple[str, Tuple[str, ...], Tuple[str, ...]], List[Tuple[Mapping[str, Any], Dict[str, Any]]]] = {}
+        self._bridge_rank_cache: Dict[Tuple[str, str, Tuple[str, ...], Tuple[str, ...]], List[Tuple[Mapping[str, Any], Dict[str, Any]]]] = {}
         self._candidate_score_cache: Dict[Tuple[str, str, Tuple[Tuple[str, float], ...]], float] = {}
+        self._residual_dense_query_vector = None
+        self._residual_dense_query_text = ""
+        self._residual_dense_score_cache: Dict[Tuple[str, str], float] = {}
         self._seen_bridge_titles: set[str] = set()
         def record_stage(stage: str, start: float, end: float, num_items_in: int | None = None, num_items_out: int | None = None, extra: Optional[Mapping[str,Any]] = None) -> None:
             if timing_recorder is not None:
@@ -496,6 +525,7 @@ class QueryMedoidRetriever:
             "query_anchor_coverage":query_anchor_coverage,
             "retrieval_variant":self.retrieval_variant,
             "seed_selection_variant":self.seed_selection_variant,
+            "residual_selection_variant":self.residual_selection_variant,
             "seed_selection_ms":round(float(timings.get("seed_selection_s",0.0) or 0.0)*1000.0,6),
             "selected_seed_count":len(seeds),
             "selected_seed_ids":selected_seed_ids,
@@ -506,6 +536,22 @@ class QueryMedoidRetriever:
             "anchor_connected_chain_by_seed_type":anchor_connected_chain_by_seed_type,
             "answer_slot_aligned_by_seed_type":answer_slot_aligned_by_seed_type,
             **self._duplicate_diagnostics(candidates),
+        })
+        first_bridge_path=next((p for b in bundles for p in b.get("evidence_path",[]) or [] if isinstance(p,Mapping) and p.get("path_type")=="mention_bridge" and p.get("bridge_prop_id")), {})
+        diag_dict.update({
+            "residual_query_text": " ".join(next((b.get("residual_terms",[]) for b in bundles if b.get("residual_terms")), []) or []),
+            "residual_query_terms": next((b.get("residual_terms",[]) for b in bundles if b.get("residual_terms")), []),
+            "residual_dense_used": bool(self._diag_counters.get("residual_dense_used",0)),
+            "residual_dense_used_rate": 1.0 if self._diag_counters.get("residual_dense_used",0) else 0.0,
+            "residual_dense_embedding_calls": int(self._diag_counters.get("residual_dense_embedding_calls",0)),
+            "residual_dense_similarity_computations": int(self._diag_counters.get("residual_dense_similarity_computations",0)),
+            "residual_dense_similarity_cache_hits": int(self._diag_counters.get("residual_dense_similarity_cache_hits",0)),
+            "bridge_prop_candidate_count": int(self._diag_counters.get("bridge_prop_candidate_count",0)),
+            "bridge_prop_selection_ms": round(float(self._active_stage_durations.get("residual_bridge_selection",0.0) or 0.0)*1000.0,6),
+            "selected_bridge_prop_id": first_bridge_path.get("bridge_prop_id"),
+            "selected_bridge_prop_title": first_bridge_path.get("bridge_title"),
+            "selected_bridge_prop_text": first_bridge_path.get("bridge_prop"),
+            "selected_bridge_prop_rank": first_bridge_path.get("selected_bridge_prop_rank"),
         })
         return {"question": question, "candidates": candidates, "seeds": seeds, "evidence_bundles": bundles, "diagnostics": diag.__dict__}
 
@@ -1225,24 +1271,105 @@ class QueryMedoidRetriever:
         n=max(1,len(candidates))
         return {term:math.log(1.0+(n-f+0.5)/(f+0.5)) for term,f in df.items()}
 
-    def _rank_bridge_props(self, candidates: Sequence[Mapping[str,Any]], residual_terms: Sequence[str], q_toks: Sequence[str]) -> List[Tuple[Mapping[str,Any],Dict[str,Any]]]:
+    def _residual_dense_query_vec(self, residual_text: str):
+        text=str(residual_text or "").strip()
+        if not text:
+            return None
+        if self._residual_dense_query_vector is not None:
+            return self._residual_dense_query_vector
+        vec=None
+        try:
+            if self._query_embedder is not None:
+                vec=self._query_embedder.encode_queries([text])[0]
+            elif self.dense_indexes:
+                vec=encode_query({"embedding": self.cfg.get("embedding", {})}, text, logger=self.logger, cache=self._embed_cache)
+        except Exception as exc:
+            if self.logger:
+                self.logger.log(f"residual.dense.warning: failed to encode residual query: {exc!r}")
+            vec=None
+        if vec is not None:
+            self._bump("residual_dense_embedding_calls")
+            self._residual_dense_query_vector=np.asarray(vec,dtype=np.float32).reshape(-1)
+            self._residual_dense_query_text=text
+        return self._residual_dense_query_vector
+
+    def _residual_dense_score(self, prop: Mapping[str,Any], residual_text: str) -> float:
+        pid=str(prop.get("prop_id",""))
+        if not pid:
+            return 0.0
+        key=(pid, str(residual_text or ""))
+        cache=getattr(self,"_residual_dense_score_cache",None)
+        if cache is not None and key in cache:
+            self._bump("residual_dense_similarity_cache_hits")
+            return float(cache[key])
+        qv=self._residual_dense_query_vec(residual_text)
+        if qv is None:
+            return 0.0
+        score=0.0
+        if self._dense_prop_matrix is not None:
+            pos=self.prop_dense_pos.get(pid)
+            if pos is not None and pos < self._dense_prop_matrix.matrix.shape[0]:
+                pv=np.asarray(self._dense_prop_matrix.matrix[pos], dtype=np.float32).reshape(-1)
+                score=float(pv @ qv)
+        elif "proposition" in self.dense_indexes:
+            dense=self.dense_indexes["proposition"]
+            pos=self.legacy_dense_prop_pos.get(pid)
+            if pos is not None and pos < dense.matrix.shape[0]:
+                pv=np.asarray(dense.matrix[pos], dtype=np.float32).reshape(-1)
+                score=float(pv @ qv)
+        self._bump("residual_dense_used")
+        self._bump("residual_dense_similarity_computations")
+        if cache is not None:
+            cache[key]=score
+        return score
+
+    def _rank_bridge_props(self, candidates: Sequence[Mapping[str,Any]], residual_terms: Sequence[str], q_toks: Sequence[str], *, bridge_title: str = "", full_query_terms: Optional[Sequence[str]] = None, variant: Optional[str] = None) -> List[Tuple[Mapping[str,Any],Dict[str,Any]]]:
         if not candidates:
             return []
+        variant=str(variant or self.residual_selection_variant)
+        scoring_terms=list(q_toks if variant=="bridge_fullquery" else residual_terms)
+        residual_text=" ".join(scoring_terms)
         idf=self._candidate_bridge_idf(candidates)
         avgdl=sum(token_count(p.get("text","")) for p in candidates)/max(1,len(candidates))
         ranked=[]
+        precomputed=[]
         for idx,prop in enumerate(candidates):
             text=prop.get("text","")
             rank_text=_bridge_rank_text(prop, candidates[idx-1] if idx>0 else None)
-            coverage=_coverage_count(residual_terms,rank_text)
-            residual_score=_lexical_bm25_score(residual_terms,rank_text,idf,avgdl)
+            coverage=_coverage_count(scoring_terms,rank_text)
+            residual_score=_lexical_bm25_score(scoring_terms,rank_text,idf,avgdl)
             original_score=jaccard(q_toks,_norm_tokens(rank_text))
+            dense_score=0.0
+            if variant in {"residual_dense_only","residual_hybrid_lex_first","residual_dense_fallback","residual_unified_alignment"}:
+                dense_score=self._residual_dense_score(prop,residual_text)
             tok_count=int(prop.get("token_count",token_count(text)) or 0)
-            rank_key=(coverage>0,coverage,residual_score,original_score,-tok_count)
+            orientation_valid=bool(not bridge_title or _norm_phrase(prop.get("title",""))==_norm_phrase(bridge_title))
+            precomputed.append((coverage,residual_score,dense_score,original_score,tok_count,orientation_valid))
+        lexical_available=any(x[0]>0 for x in precomputed)
+        for idx,prop in enumerate(candidates):
+            text=prop.get("text","")
+            rank_text=_bridge_rank_text(prop, candidates[idx-1] if idx>0 else None)
+            coverage,residual_score,dense_score,original_score,tok_count,orientation_valid=precomputed[idx]
+            if variant in {"residual_lexical","bridge_fullquery"}:
+                rank_key=(coverage>0,coverage,residual_score,original_score,-tok_count)
+            elif variant=="residual_dense_only":
+                rank_key=(orientation_valid,dense_score,original_score,-tok_count)
+            elif variant=="residual_dense_fallback":
+                if lexical_available:
+                    rank_key=(coverage>0,coverage,residual_score,original_score,-tok_count)
+                else:
+                    rank_key=(orientation_valid,dense_score,original_score,-tok_count)
+            elif variant in {"residual_hybrid_lex_first","residual_unified_alignment"}:
+                rank_key=(orientation_valid,coverage>0,coverage,residual_score,dense_score,original_score,-tok_count)
+            else:
+                rank_key=(coverage>0,coverage,residual_score,original_score,-tok_count)
             info={
+                "residual_selection_variant":variant,
                 "residual_coverage_count":coverage,
                 "residual_score":round(float(residual_score),6),
+                "residual_dense_score":round(float(dense_score),6),
                 "original_relevance_score":round(float(original_score),6),
+                "orientation_valid":orientation_valid,
                 "token_count":tok_count,
                 "rank_key":rank_key,
             }
@@ -1250,22 +1377,25 @@ class QueryMedoidRetriever:
                 info["display_text"]=rank_text
             ranked.append((prop,info))
         ranked.sort(key=lambda x:x[1]["rank_key"], reverse=True)
+        for rank,(_,info) in enumerate(ranked, start=1):
+            info["selected_bridge_prop_rank"]=rank
         return ranked
 
     def _rank_bridge_props_cached(self, bridge_title: str, candidates: Sequence[Mapping[str,Any]], residual_terms: Sequence[str], q_toks: Sequence[str]) -> List[Tuple[Mapping[str,Any],Dict[str,Any]]]:
         cache=getattr(self,"_bridge_rank_cache",None)
-        key=(str(bridge_title), tuple(str(t) for t in residual_terms), tuple(str(t) for t in q_toks))
+        key=(self.residual_selection_variant, str(bridge_title), tuple(str(t) for t in residual_terms), tuple(str(t) for t in q_toks))
         if cache is not None and key in cache:
             self._bump("num_bridge_prop_score_cache_hits", len(cache[key]))
             return [(prop, dict(info)) for prop,info in cache[key]]
         self._bump("num_bridge_prop_score_computations", len(candidates))
-        ranked=self._rank_bridge_props(candidates,residual_terms,q_toks)
+        self._bump("bridge_prop_candidate_count", len(candidates))
+        ranked=self._rank_bridge_props(candidates,residual_terms,q_toks,bridge_title=bridge_title)
         if cache is not None:
             cache[key]=[(prop, dict(info)) for prop,info in ranked]
         return ranked
 
     def _rank_multi_anchor_props(self, candidates: Sequence[Mapping[str,Any]], residual_terms: Sequence[str], q_toks: Sequence[str], comparison_like: bool) -> List[Tuple[Mapping[str,Any],Dict[str,Any]]]:
-        ranked=self._rank_bridge_props(candidates,residual_terms,q_toks)
+        ranked=self._rank_bridge_props(candidates,residual_terms,q_toks,variant="residual_lexical")
         if comparison_like:
             ranked.sort(key=lambda x:(_has_date_signal(x[0].get("text","")),x[1]["rank_key"]), reverse=True)
         return ranked
@@ -1432,7 +1562,7 @@ class QueryMedoidRetriever:
                 cid=str(prop.get("chunk_id",""))
                 if cid and cid not in existing_chunk_ids and cid in self.chunk_by_id:
                     bundle.setdefault("source_chunks",[]).append(dict(self.chunk_by_id[cid])); existing_chunk_ids.add(cid)
-                bridge_paths.append({"path_type":"mention_bridge","source_title":str(source_prop.get("title","")),"seed_prop":str(source_prop.get("text","")),"mention":row.get("mention"),"bridge_title":title,"bridge_prop":str(info.get("display_text") or prop.get("text","")),"seed_prop_id":source_prop.get("prop_id"),"bridge_prop_id":prop.get("prop_id"),"residual_query":" ".join(residual_terms),"residual_terms":residual_terms,"residual_coverage_count":info.get("residual_coverage_count",0),"residual_score":info.get("residual_score",0.0),"original_relevance_score":info.get("original_relevance_score",0.0)})
+                bridge_paths.append({"path_type":"mention_bridge","source_title":str(source_prop.get("title","")),"seed_prop":str(source_prop.get("text","")),"mention":row.get("mention"),"bridge_title":title,"bridge_prop":str(info.get("display_text") or prop.get("text","")),"seed_prop_id":source_prop.get("prop_id"),"bridge_prop_id":prop.get("prop_id"),"residual_query":" ".join(residual_terms),"residual_terms":residual_terms,"residual_selection_variant":self.residual_selection_variant,"residual_coverage_count":info.get("residual_coverage_count",0),"residual_score":info.get("residual_score",0.0),"residual_dense_score":info.get("residual_dense_score",0.0),"original_relevance_score":info.get("original_relevance_score",0.0),"selected_bridge_prop_rank":info.get("selected_bridge_prop_rank"),"bridge_prop_candidate_count":len(candidates)})
         if not bridge_props:
             return
         bridge_connected=bool(base_props and bridge_titles and bridge_props)
@@ -1445,6 +1575,7 @@ class QueryMedoidRetriever:
         bundle["bridge_connected"]=bridge_connected
         bundle["residual_terms"]=residual_terms_all
         bundle["residual_query"]=" ".join(residual_terms_all)
+        bundle["residual_selection_variant"]=self.residual_selection_variant
         bundle["residual_coverage_count"]=total_residual_coverage
         bundle["answer_slot_aligned"]=answer_slot_aligned
         bundle["chain_complete_v2"]=bridge_connected and answer_slot_aligned
@@ -1457,7 +1588,7 @@ class QueryMedoidRetriever:
         timing=dict(diag.get("timing",{}) or {})
         timing["mention_bridge_expansion_s"]=round(mention_elapsed,6)
         timing["residual_bridge_selection_s"]=round(self._active_stage_durations.get("residual_bridge_selection",0.0),6)
-        diag.update({"bridge_titles":len(bridge_titles),"bridge_prop_count":len(bridge_props),"bridge_connected":bridge_connected,"answer_slot_aligned":answer_slot_aligned,"chain_complete_v2":bundle["chain_complete_v2"],"residual_coverage_count":total_residual_coverage,"residual_query":bundle["residual_query"],"refinement":"same-title + mention-bridge residual expansion","timing":timing})
+        diag.update({"bridge_titles":len(bridge_titles),"bridge_prop_count":len(bridge_props),"bridge_connected":bridge_connected,"answer_slot_aligned":answer_slot_aligned,"chain_complete_v2":bundle["chain_complete_v2"],"residual_selection_variant":self.residual_selection_variant,"residual_coverage_count":total_residual_coverage,"residual_query":bundle["residual_query"],"residual_dense_used":bool(self._diag_counters.get("residual_dense_used",0)),"refinement":"same-title + mention-bridge residual expansion","timing":timing})
         bundle["diagnostics"]=diag
 
     def _exact_anchor_match(self, question: str, title: str) -> bool:

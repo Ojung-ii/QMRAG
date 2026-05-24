@@ -25,6 +25,7 @@ def parse_args():
     p.add_argument("--rendering-profile", choices=sorted(RENDERING_PROFILES), default=None)
     p.add_argument("--retrieval-variant", choices=["full_hetero","prop_text_only","prop_parent_anchor","prop_parent_mention_bidirectional"], default=None)
     p.add_argument("--seed-selection-variant", choices=["medoid_current","top_relevance","anchor_first","chain_potential"], default=None)
+    p.add_argument("--residual-selection", choices=["residual_lexical","bridge_fullquery","residual_dense_only","residual_hybrid_lex_first","residual_dense_fallback","residual_unified_alignment"], default=None)
     p.add_argument("--candidate-pool-size", type=int, default=None, help="Enable candidate cap ablation with this total candidate count.")
     p.add_argument("--stable-dedup-before-seed", action="store_true", help="Enable stable candidate dedup before seed selection as an ablation flag.")
     p.add_argument("--enable-timing", action="store_true")
@@ -56,6 +57,9 @@ def apply_overrides(cfg: Dict[str,Any], args) -> Dict[str,Any]:
         cfg.setdefault("retrieval",{})["retrieval_variant"]=args.retrieval_variant
     if args.seed_selection_variant:
         cfg.setdefault("retrieval",{})["seed_selection_variant"]=args.seed_selection_variant
+    if args.residual_selection:
+        cfg.setdefault("retrieval",{}).setdefault("bridge",{})["selection"]=args.residual_selection
+        cfg.setdefault("retrieval",{})["residual_selection"]=args.residual_selection
     if args.candidate_pool_size is not None:
         cap_cfg=cfg.setdefault("retrieval",{}).setdefault("candidate_cap",{})
         cap_cfg["enabled"]=True
