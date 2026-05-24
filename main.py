@@ -12,6 +12,7 @@ from utils.embedding import build_or_load_dense_indexes
 from utils.io_utils import ExperimentLogger, dump_json, dump_yaml, ensure_dir, load_yaml, now_timestamp, to_jsonable
 from utils.retrieval import QueryMedoidRetriever
 from utils.text import safe_truncate
+from utils.timing import TimingRecorder
 
 def parse_args():
     p=argparse.ArgumentParser(description="QMRAG: Query-conditioned Medoid RAG runner")
@@ -22,6 +23,8 @@ def parse_args():
     p.add_argument("--vllm-base-url", default=None); p.add_argument("--vllm-model", default=None); p.add_argument("--embedding-model-path", default=None); p.add_argument("--embedding-device", default=None); p.add_argument("--embedding-batch-size", type=int, default=None)
     p.add_argument("--prompt-profile", choices=sorted(PROMPT_TEMPLATES), default=None)
     p.add_argument("--rendering-profile", choices=sorted(RENDERING_PROFILES), default=None)
+    p.add_argument("--retrieval-variant", choices=["full_hetero","prop_text_only","prop_parent_anchor","prop_parent_mention_bidirectional"], default=None)
+    p.add_argument("--enable-timing", action="store_true")
     p.add_argument("--continue-on-error", action="store_true")
     return p.parse_args()
 
@@ -46,6 +49,10 @@ def apply_overrides(cfg: Dict[str,Any], args) -> Dict[str,Any]:
         cfg.setdefault("indexing",{}).setdefault("embedding",{})["device"]=args.embedding_device; cfg.setdefault("retrieval",{}).setdefault("embedding",{})["device"]=args.embedding_device
     if args.embedding_batch_size:
         cfg.setdefault("indexing",{}).setdefault("embedding",{})["batch_size"]=args.embedding_batch_size; cfg.setdefault("retrieval",{}).setdefault("embedding",{})["batch_size"]=args.embedding_batch_size
+    if args.retrieval_variant:
+        cfg.setdefault("retrieval",{})["retrieval_variant"]=args.retrieval_variant
+    if args.enable_timing:
+        cfg.setdefault("run",{})["enable_timing"]=True
     idx_emb=cfg.get("indexing",{}).get("embedding",{})
     cfg.setdefault("retrieval",{})["embedding"]={**idx_emb, **cfg.get("retrieval",{}).get("embedding",{})}
     return cfg
@@ -183,7 +190,7 @@ def copy_compat_outputs(out_dir: Path, compat_dir: Path) -> None:
     if out_dir.resolve()==compat_dir.resolve():
         return
     ensure_dir(compat_dir)
-    for name in ("config.yaml","predictions.jsonl","예측결과.jsonl","eval.json","eval_summary.md"):
+    for name in ("config.yaml","predictions.jsonl","예측결과.jsonl","eval.json","eval_summary.md","timing_events.jsonl","timing_summary.json","timing_summary.md"):
         src=out_dir/name
         if src.exists():
             shutil.copy2(src,compat_dir/name)
@@ -257,6 +264,7 @@ def run_dataset(dataset: str, cfg: Dict[str,Any], args, timestamp: str):
     if args.mode=="eval" and not has_predictions(out_dir) and has_predictions(compat_dir):
         out_dir=compat_dir
     logger=ExperimentLogger(out_dir, echo=bool(cfg.get("run",{}).get("echo_logs",True)))
+    timing=TimingRecorder(out_dir, enabled=bool(cfg.get("run",{}).get("enable_timing",False) or getattr(args,"enable_timing",False)))
     logger.log(f"Run dataset={dataset} mode={args.mode} timestamp={timestamp}")
     logger.log(f"Eval output: {out_dir}")
     logger.log(f"Index target: {index_target_dir}")
@@ -266,9 +274,13 @@ def run_dataset(dataset: str, cfg: Dict[str,Any], args, timestamp: str):
     if args.mode=="eval": return eval_only(dataset,out_dir,logger,prompt_profile,compat_dir)
     ds_cfg=cfg.get("datasets",{}).get(dataset)
     if not ds_cfg: raise ValueError(f"Dataset {dataset} not in config")
-    with logger.time_block("data.load", dataset=dataset): qas,docs=load_dataset(dataset,ds_cfg,args.limit,args.corpus_limit)
+    with timing.time_block(dataset=dataset, stage="data_load", query_id=None) as tdata:
+        with logger.time_block("data.load", dataset=dataset): qas,docs=load_dataset(dataset,ds_cfg,args.limit,args.corpus_limit)
+        tdata["num_items_out"]=len(qas)
     logger.log(f"Loaded QA={len(qas)} docs={len(docs)}")
-    idx,index_dir,index_info=build_or_load_index(dataset,docs,cfg,index_target_dir,output_root,logger,args.reindex,args.rebuild_embeddings)
+    with timing.time_block(dataset=dataset, stage="index_load", query_id=None, num_items_in=len(docs)) as tidx:
+        idx,index_dir,index_info=build_or_load_index(dataset,docs,cfg,index_target_dir,output_root,logger,args.reindex,args.rebuild_embeddings)
+        tidx["num_items_out"]=len(idx.get("propositions",[]) or [])
     if index_dir.resolve()==index_target_dir.resolve():
         dump_yaml(cfg,index_target_dir/"config.yaml")
     logger.log(f"Using index_dir={index_dir} source={index_info.get('index_source')}")
@@ -285,11 +297,15 @@ def run_dataset(dataset: str, cfg: Dict[str,Any], args, timestamp: str):
             index_info={**index_info,"index_source":"copied_latest_for_dense","source_index_dir":str(index_dir),"index_dir":str(index_target_dir)}
             index_dir=index_target_dir
         logger.log("Building/loading dense indexes")
-        with logger.time_block("index.build_dense_indexes", dataset=dataset):
-            dense_indexes=build_or_load_dense_indexes(idx,cfg.get("retrieval",{}),index_dir,logger,force=dense_force)
+        with timing.time_block(dataset=dataset, stage="embedding_load", query_id=None, num_items_in=len(idx.get("propositions",[]) or [])) as temb:
+            with logger.time_block("index.build_dense_indexes", dataset=dataset):
+                dense_indexes=build_or_load_dense_indexes(idx,cfg.get("retrieval",{}),index_dir,logger,force=dense_force)
+            temb["num_items_out"]=len(dense_indexes)
         logger.log(f"Dense indexes ready: units={list(dense_indexes.keys())}")
     copy_compat_index(index_dir,compat_dir,logger)
-    if args.mode=="index": return {"dataset":dataset,"n":0,"status":"indexed","prompt_profile":prompt_profile,"rendering_profile":rendering_profile,"index_dir":str(index_dir),**index_info,"index_meta":idx.get("meta",{})}
+    if args.mode=="index":
+        timing.write_summary()
+        return {"dataset":dataset,"n":0,"status":"indexed","prompt_profile":prompt_profile,"rendering_profile":rendering_profile,"retrieval_variant":str(cfg.get("retrieval",{}).get("retrieval_variant","full_hetero")),"index_dir":str(index_dir),**index_info,"index_meta":idx.get("meta",{})}
     retriever=QueryMedoidRetriever(idx,cfg.get("retrieval",{}),dense_indexes,logger); preds=[]; pko=out_dir/"예측결과.jsonl"; pen=out_dir/"predictions.jsonl"
     for p in [pko,pen]:
         if p.exists(): p.unlink()
@@ -297,29 +313,41 @@ def run_dataset(dataset: str, cfg: Dict[str,Any], args, timestamp: str):
         with open(pko,"a",encoding="utf-8") as fko, open(pen,"a",encoding="utf-8") as fen:
             for qa in tqdm(qas, desc=dataset, ncols=100):
                 try:
-                    with logger.time_block("retrieve.one", dataset=dataset, qid=qa.id): ret=retriever.retrieve(qa.question, qa.metadata)
+                    with logger.time_block("retrieve.one", dataset=dataset, qid=qa.id): ret=retriever.retrieve(qa.question, qa.metadata, dataset=dataset, query_id=qa.id, timing_recorder=timing)
                     t=time.perf_counter()
                     with logger.time_block("generate.one", dataset=dataset, qid=qa.id): gen=generate_answer(qa.question, ret["evidence_bundles"], cfg.get("generation",{}))
+                    gen_timings=dict(gen.get("generation_stage_timings_s",{}) or {})
+                    timing.record_duration(dataset=dataset, query_id=qa.id, stage="context_rendering", duration_s=float(gen_timings.get("context_rendering",0.0) or 0.0), num_items_in=len(ret.get("evidence_bundles",[]) or []), num_items_out=1, extra={"retrieval_variant":str(cfg.get("retrieval",{}).get("retrieval_variant","full_hetero"))})
+                    timing.record_duration(dataset=dataset, query_id=qa.id, stage="generation", duration_s=float(gen_timings.get("generation",gen.get("generation_latency_s",0.0)) or 0.0), num_items_in=1, num_items_out=1, extra={"provider":gen.get("generation_provider") or gen.get("llm_provider")})
                     raw_prediction=str(gen.get("raw_prediction",gen.get("prediction","")) or "")
                     prediction=normalize_prediction_for_eval(gen.get("prediction",raw_prediction))
                     generation_provider=gen.get("generation_provider") or gen.get("llm_provider") or cfg.get("generation",{}).get("provider")
                     row_prompt_profile=str(gen.get("prompt_profile",prompt_profile))
                     row_rendering_profile=str(gen.get("rendering_profile",rendering_profile) or DEFAULT_RENDERING_PROFILE)
-                    row={"dataset":dataset,"id":qa.id,"question":qa.question,"raw_prediction":raw_prediction,"prediction":prediction,"answers":qa.answers,"support_titles":qa.support_titles,"support_facts":qa.support_facts,"prompt_profile":row_prompt_profile,"rendering_profile":row_rendering_profile,"prompt_experiment_type":prompt_experiment_type(row_prompt_profile,row_rendering_profile),"generation_provider":generation_provider,"evidence_bundles":ret["evidence_bundles"],"seeds":ret["seeds"],"retrieval_diagnostics":ret["diagnostics"],"generation_latency_s":float(gen.get("generation_latency_s",round(time.perf_counter()-t,6)) or 0.0),"llm_provider":generation_provider,"llm_model":gen.get("model"),"llm_usage":gen.get("usage")}
+                    retrieval_variant=str(cfg.get("retrieval",{}).get("retrieval_variant","full_hetero"))
+                    row={"dataset":dataset,"id":qa.id,"question":qa.question,"raw_prediction":raw_prediction,"prediction":prediction,"answers":qa.answers,"support_titles":qa.support_titles,"support_facts":qa.support_facts,"prompt_profile":row_prompt_profile,"rendering_profile":row_rendering_profile,"prompt_experiment_type":prompt_experiment_type(row_prompt_profile,row_rendering_profile),"retrieval_variant":retrieval_variant,"generation_provider":generation_provider,"evidence_bundles":ret["evidence_bundles"],"seeds":ret["seeds"],"retrieval_diagnostics":ret["diagnostics"],"generation_latency_s":float(gen.get("generation_latency_s",round(time.perf_counter()-t,6)) or 0.0),"llm_provider":generation_provider,"llm_model":gen.get("model"),"llm_usage":gen.get("usage")}
                     if gen.get("generation_error"): row["generation_error"]=gen.get("generation_error")
                     row=add_generation_logging_fields(row,gen,cfg)
                 except Exception as e:
                     logger.event({"event":"example.error","dataset":dataset,"qid":qa.id,"error":repr(e)})
                     if not args.continue_on_error: raise
                     generation_provider=cfg.get("generation",{}).get("provider")
-                    row={"dataset":dataset,"id":qa.id,"question":qa.question,"raw_prediction":"","prediction":"","answers":qa.answers,"support_titles":qa.support_titles,"prompt_profile":prompt_profile,"rendering_profile":rendering_profile,"prompt_experiment_type":prompt_experiment_type(prompt_profile,rendering_profile),"generation_provider":generation_provider,"error":repr(e),"evidence_bundles":[],"seeds":[],"retrieval_diagnostics":{"candidate_count":0,"seed_count":0,"bundle_count":0,"context_tokens":0,"timings":{}},"generation_latency_s":0.0,"llm_provider":generation_provider}
+                    row={"dataset":dataset,"id":qa.id,"question":qa.question,"raw_prediction":"","prediction":"","answers":qa.answers,"support_titles":qa.support_titles,"prompt_profile":prompt_profile,"rendering_profile":rendering_profile,"prompt_experiment_type":prompt_experiment_type(prompt_profile,rendering_profile),"retrieval_variant":str(cfg.get("retrieval",{}).get("retrieval_variant","full_hetero")),"generation_provider":generation_provider,"error":repr(e),"evidence_bundles":[],"seeds":[],"retrieval_diagnostics":{"candidate_count":0,"seed_count":0,"bundle_count":0,"context_tokens":0,"timings":{}},"generation_latency_s":0.0,"llm_provider":generation_provider}
                     row=add_generation_logging_fields(row,{"rendered_context":"","prompt":""},cfg)
-                preds.append(row); append_line(fko,row); append_line(fen,row)
-    with logger.time_block("eval", dataset=dataset, n=len(preds)):
-        log_retrieval_summary(preds,logger)
-        res=evaluate_predictions(preds,dataset=dataset,prompt_profile=prompt_profile); res["index_dir"]=str(index_dir); res["index_source"]=index_info.get("index_source"); res["bridge_config"]=dict(cfg.get("retrieval",{}).get("bridge",{}) or {})
-        if index_info.get("source_index_dir"): res["source_index_dir"]=index_info.get("source_index_dir")
-        dump_json(res,out_dir/"eval.json"); (out_dir/"eval_summary.md").write_text(summary_markdown(dataset,res),encoding="utf-8")
+                preds.append(row)
+                with timing.time_block(dataset=dataset, query_id=qa.id, stage="write_outputs", num_items_in=1) as twrite:
+                    append_line(fko,row); append_line(fen,row)
+                    twrite["num_items_out"]=2
+    with timing.time_block(dataset=dataset, stage="evaluation", query_id=None, num_items_in=len(preds)):
+        with logger.time_block("eval", dataset=dataset, n=len(preds)):
+            log_retrieval_summary(preds,logger)
+            res=evaluate_predictions(preds,dataset=dataset,prompt_profile=prompt_profile); res["index_dir"]=str(index_dir); res["index_source"]=index_info.get("index_source"); res["bridge_config"]=dict(cfg.get("retrieval",{}).get("bridge",{}) or {})
+            res["retrieval_variant"]=str(cfg.get("retrieval",{}).get("retrieval_variant","full_hetero"))
+            if index_info.get("source_index_dir"): res["source_index_dir"]=index_info.get("source_index_dir")
+            dump_json(res,out_dir/"eval.json"); (out_dir/"eval_summary.md").write_text(summary_markdown(dataset,res),encoding="utf-8")
+    timing_summary=timing.write_summary()
+    if timing_summary:
+        res["timing_summary"]=timing_summary
     copy_compat_outputs(out_dir,compat_dir)
     return {"dataset":dataset, **{k:v for k,v in res.items() if k!="per_example"}}
 

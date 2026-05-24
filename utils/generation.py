@@ -505,17 +505,26 @@ def _generate_vllm(prompt: str, cfg: Mapping[str,Any]) -> Dict[str,Any]:
     return {"raw_prediction":pred,"prediction":normalize_prediction_for_eval(pred),"llm_provider":"vllm","generation_provider":"vllm","model":model,"base_url":base_url,"usage":usage.model_dump() if hasattr(usage,"model_dump") else {}}
 
 def generate_answer(question: str, bundles: Sequence[Mapping[str,Any]], cfg: Mapping[str,Any]) -> Dict[str,Any]:
-    provider=str(cfg.get("provider","none")).lower(); prompt,prompt_profile,rendered_context=build_generation_prompt(question,bundles,cfg); rendering_profile=str(cfg.get("rendering_profile") or DEFAULT_RENDERING_PROFILE); t0=time.perf_counter()
+    provider=str(cfg.get("provider","none")).lower()
+    render_t0=time.perf_counter()
+    prompt,prompt_profile,rendered_context=build_generation_prompt(question,bundles,cfg)
+    context_rendering_s=round(time.perf_counter()-render_t0,6)
+    rendering_profile=str(cfg.get("rendering_profile") or DEFAULT_RENDERING_PROFILE)
+    t0=time.perf_counter()
     if provider in {"none","extractive","fallback","no-llm"}:
         raw_prediction=extractive_fallback_answer(question,bundles)
-        return {"raw_prediction":raw_prediction,"prediction":normalize_prediction_for_eval(raw_prediction),"rendered_context":rendered_context,"prompt":prompt,"prompt_profile":prompt_profile,"rendering_profile":rendering_profile,"generation_latency_s":round(time.perf_counter()-t0,6),"llm_provider":"extractive_fallback","generation_provider":"extractive_fallback"}
+        generation_s=round(time.perf_counter()-t0,6)
+        return {"raw_prediction":raw_prediction,"prediction":normalize_prediction_for_eval(raw_prediction),"rendered_context":rendered_context,"prompt":prompt,"prompt_profile":prompt_profile,"rendering_profile":rendering_profile,"generation_latency_s":generation_s,"generation_stage_timings_s":{"context_rendering":context_rendering_s,"generation":generation_s},"llm_provider":"extractive_fallback","generation_provider":"extractive_fallback"}
     if provider=="vllm":
         last=None
         for attempt in range(int(cfg.get("retries",1))+1):
             try:
-                out=_generate_vllm(prompt,cfg); out["prompt"]=prompt; out["rendered_context"]=rendered_context; out["prompt_profile"]=prompt_profile; out["rendering_profile"]=rendering_profile; out["generation_latency_s"]=round(time.perf_counter()-t0,6); return out
+                out=_generate_vllm(prompt,cfg)
+                generation_s=round(time.perf_counter()-t0,6)
+                out["prompt"]=prompt; out["rendered_context"]=rendered_context; out["prompt_profile"]=prompt_profile; out["rendering_profile"]=rendering_profile; out["generation_latency_s"]=generation_s; out["generation_stage_timings_s"]={"context_rendering":context_rendering_s,"generation":generation_s}; return out
             except Exception as e:
                 last=e
                 if attempt<int(cfg.get("retries",1)): time.sleep(float(cfg.get("retry_sleep_s",2.0)))
-        return {"raw_prediction":"","prediction":"","rendered_context":rendered_context,"prompt":prompt,"prompt_profile":prompt_profile,"rendering_profile":rendering_profile,"generation_latency_s":round(time.perf_counter()-t0,6),"llm_provider":"vllm","generation_provider":"vllm","generation_error":repr(last)}
+        generation_s=round(time.perf_counter()-t0,6)
+        return {"raw_prediction":"","prediction":"","rendered_context":rendered_context,"prompt":prompt,"prompt_profile":prompt_profile,"rendering_profile":rendering_profile,"generation_latency_s":generation_s,"generation_stage_timings_s":{"context_rendering":context_rendering_s,"generation":generation_s},"llm_provider":"vllm","generation_provider":"vllm","generation_error":repr(last)}
     raise ValueError(f"Unsupported generation.provider={provider}")

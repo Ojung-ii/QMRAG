@@ -292,6 +292,9 @@ class QueryMedoidRetriever:
         self.index = index
         self.cfg = cfg
         self.logger = logger
+        self.retrieval_variant = str(cfg.get("retrieval_variant", "full_hetero") or "full_hetero")
+        if self.retrieval_variant not in {"full_hetero", "prop_text_only", "prop_parent_anchor", "prop_parent_mention_bidirectional"}:
+            raise ValueError(f"Unsupported retrieval_variant={self.retrieval_variant!r}")
         self.dense_indexes = dict(dense_indexes or {}) if isinstance(dense_indexes, Mapping) else {}
         self.index_dir = Path(dense_indexes) if dense_indexes is not None and not isinstance(dense_indexes, Mapping) else None
         self._dense_prop_matrix = None
@@ -347,14 +350,44 @@ class QueryMedoidRetriever:
         if self.bridge_requested and not self.bridge_enabled:
             self._warn_bridge(self.bridge_index_warning or "Bridge retrieval disabled because the mention bridge index is empty")
 
-    def retrieve(self, question: str, metadata: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+    def retrieve(self, question: str, metadata: Optional[Mapping[str, Any]] = None, dataset: str | None = None, query_id: str | None = None, timing_recorder: Any = None) -> Dict[str, Any]:
         timings: Dict[str, float] = {}
+        self._active_stage_durations: Dict[str,float] = defaultdict(float)
+        self._active_stage_counts: Dict[str,int] = defaultdict(int)
+        def record_stage(stage: str, start: float, end: float, num_items_in: int | None = None, num_items_out: int | None = None, extra: Optional[Mapping[str,Any]] = None) -> None:
+            if timing_recorder is not None:
+                timing_recorder.record(
+                    dataset=str(dataset or ""),
+                    query_id=str(query_id) if query_id is not None else None,
+                    stage=stage,
+                    start_ts=start,
+                    end_ts=end,
+                    num_items_in=num_items_in,
+                    num_items_out=num_items_out,
+                    extra=extra,
+                )
         t_all = time.perf_counter()
-        query_anchor_info=self._extract_query_anchor_info(question)
+        wall0=time.time(); t0=time.perf_counter(); query_anchor_info=self._extract_query_anchor_info(question); elapsed=time.perf_counter()-t0
+        timings["query_preprocess_s"] = elapsed
+        record_stage("query_preprocess", wall0, wall0+elapsed, 1, len(query_anchor_info.get("query_anchor_titles",[]) or []), {"retrieval_variant":self.retrieval_variant})
         metadata = {**(metadata or {}), "_query_anchor_titles":query_anchor_info.get("query_anchor_titles",[]), "_query_relation_titles":query_anchor_info.get("query_relation_titles",[])}
-        t0 = time.perf_counter(); candidates = self._candidate_retrieval(question, metadata); timings["candidate_retrieval_s"] = time.perf_counter() - t0
-        t0 = time.perf_counter(); seeds = self._sampled_medoid_seeding(candidates); timings["medoid_seeding_s"] = time.perf_counter() - t0
-        t0 = time.perf_counter(); bundles = self._local_refinement(question, seeds, candidates, query_anchor_info); timings["local_refinement_s"] = time.perf_counter() - t0
+        wall0=time.time(); t0 = time.perf_counter(); candidates = self._candidate_retrieval(question, metadata); elapsed=time.perf_counter() - t0; timings["candidate_retrieval_s"] = elapsed
+        record_stage("candidate_retrieval", wall0, wall0+elapsed, 1, len(candidates), {"retrieval_variant":self.retrieval_variant})
+        wall0=time.time(); t0 = time.perf_counter(); seeds = self._sampled_medoid_seeding(candidates); elapsed=time.perf_counter() - t0; timings["seed_selection_s"] = elapsed; timings["medoid_seeding_s"] = elapsed
+        record_stage("seed_selection", wall0, wall0+elapsed, len(candidates), len(seeds), {"retrieval_variant":self.retrieval_variant})
+        wall0=time.time(); t0 = time.perf_counter(); bundles = self._local_refinement(question, seeds, candidates, query_anchor_info); elapsed=time.perf_counter() - t0; timings["local_refinement_s"] = elapsed
+        bridge_time=self._active_stage_durations.get("mention_bridge_expansion",0.0)
+        residual_time=self._active_stage_durations.get("residual_bridge_selection",0.0)
+        order_time=self._active_stage_durations.get("anchor_chain_ordering",0.0)
+        same_title=max(0.0, elapsed-bridge_time-residual_time-order_time)
+        timings["same_title_refinement_s"]=same_title
+        timings["mention_bridge_expansion_s"]=bridge_time
+        timings["residual_bridge_selection_s"]=residual_time
+        timings["anchor_chain_ordering_s"]=order_time
+        record_stage("same_title_refinement", wall0, wall0+same_title, len(seeds), len(bundles), {"retrieval_variant":self.retrieval_variant})
+        record_stage("mention_bridge_expansion", wall0+same_title, wall0+same_title+bridge_time, len(seeds), sum(1 for b in bundles if b.get("has_bridge")), {"retrieval_variant":self.retrieval_variant})
+        record_stage("residual_bridge_selection", wall0+same_title+bridge_time, wall0+same_title+bridge_time+residual_time, sum(1 for b in bundles if b.get("has_bridge")), sum(1 for b in bundles if b.get("answer_slot_aligned")), {"retrieval_variant":self.retrieval_variant})
+        record_stage("anchor_chain_ordering", wall0+same_title+bridge_time+residual_time, wall0+same_title+bridge_time+residual_time+order_time, len(bundles), len(bundles), {"retrieval_variant":self.retrieval_variant})
         t0 = time.perf_counter(); bundles, context_tokens = self._budget_context(bundles); timings["budgeting_s"] = time.perf_counter() - t0
         timings["total_retrieval_s"] = time.perf_counter() - t_all
         diag = RetrievalDiagnostics(
@@ -370,6 +403,11 @@ class QueryMedoidRetriever:
             },
             dense_enabled=bool(self.dense_indexes) or self._dense_prop_matrix is not None or self._dense_chunk_matrix is not None,
         )
+        seed_type_distribution=dict(Counter(str(s.get("seed_unit_type") or self._seed_unit_type(s)) for s in seeds))
+        selected_bundle_source_type_distribution=dict(Counter(str(b.get("selected_bundle_source_type") or b.get("seed_unit_type") or "fallback") for b in bundles))
+        chain_success_by_seed_type=dict(Counter(str(b.get("selected_bundle_source_type") or "fallback") for b in bundles if b.get("chain_complete_v2")))
+        anchor_connected_chain_by_seed_type=dict(Counter(str(b.get("selected_bundle_source_type") or "fallback") for b in bundles if b.get("anchor_connected_chain_complete")))
+        answer_slot_aligned_by_seed_type=dict(Counter(str(b.get("selected_bundle_source_type") or "fallback") for b in bundles if b.get("answer_slot_aligned")))
         bridge_titles={t for b in bundles for t in b.get("bridge_titles",[]) or []}
         bridge_connected_count=sum(1 for b in bundles if b.get("bridge_connected"))
         answer_slot_aligned_count=sum(1 for b in bundles if b.get("answer_slot_aligned"))
@@ -410,8 +448,41 @@ class QueryMedoidRetriever:
             "has_multi_anchor_bundle":multi_anchor_bundle_count>0,
             "generic_relation_top1":bool(top1.get("is_relation_title_bundle")),
             "query_anchor_coverage":query_anchor_coverage,
+            "retrieval_variant":self.retrieval_variant,
+            "seed_unit_type_distribution":seed_type_distribution,
+            "selected_bundle_source_type_distribution":selected_bundle_source_type_distribution,
+            "chain_success_by_seed_type":chain_success_by_seed_type,
+            "anchor_connected_chain_by_seed_type":anchor_connected_chain_by_seed_type,
+            "answer_slot_aligned_by_seed_type":answer_slot_aligned_by_seed_type,
         })
         return {"question": question, "candidates": candidates, "seeds": seeds, "evidence_bundles": bundles, "diagnostics": diag.__dict__}
+
+    def _seed_unit_type(self, cand: Mapping[str,Any]) -> str:
+        unit=str(cand.get("unit") or cand.get("seed_unit_type") or "")
+        if unit=="entity":
+            return "title"
+        if unit in {"chunk","proposition","fallback","multi_anchor"}:
+            return unit
+        if cand.get("score_components") and set(cand.get("score_components",{}))=={"dense"}:
+            return "dense_candidate"
+        return unit or "fallback"
+
+    def _prop_candidate(self, prop: Mapping[str,Any], raw_scores: Optional[Mapping[str,Any]]=None) -> Dict[str,Any]:
+        pid=str(prop.get("prop_id",""))
+        mentioned=list(self.prop_to_mentioned_titles.get(pid,[]) or [])
+        return {
+            "unit":"proposition",
+            "id":pid,
+            "title":prop.get("title"),
+            "text":prop.get("text"),
+            "chunk_id":prop.get("chunk_id"),
+            "tokens":prop.get("token_count", token_count(prop.get("text", ""))),
+            "raw_scores":dict(raw_scores or {}),
+            "original_candidate_type":"proposition",
+            "seed_unit_type":"proposition",
+            "parent_title":prop.get("title"),
+            "mentioned_titles":mentioned,
+        }
 
     def _warn_bridge(self, message: str) -> None:
         self.bridge_index_warning=message
@@ -525,16 +596,19 @@ class QueryMedoidRetriever:
         bm25_top_k = int(self.cfg.get("bm25", {}).get("top_k", top_k))
         dense_top_k = int(self.cfg.get("dense", {}).get("top_k", top_k))
         search_units = set(self.cfg.get("search_units", ["proposition", "chunk", "entity"]))
+        if self.retrieval_variant != "full_hetero":
+            search_units = {"proposition"}
         weights = self.cfg.get("weights", {})
         w_bm25, w_dense, w_entity = float(weights.get("bm25", 0.35)), float(weights.get("dense", 0.55)), float(weights.get("entity", 0.10))
         merged: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        query_anchor_norms={_norm_phrase(t) for t in metadata.get("_query_anchor_titles",[]) or []}
 
         if "proposition" in search_units:
             prop_pairs = self.prop_bm25.topk(question, bm25_top_k)
             norm = _rank_norm([("proposition", self.props[i]["prop_id"]) for i, _ in prop_pairs])
             for idx, raw in prop_pairs:
                 p = self.props[idx]
-                self._add_candidate(merged, {"unit":"proposition","id":p["prop_id"],"title":p["title"],"text":p["text"],"chunk_id":p["chunk_id"],"tokens":p.get("token_count", token_count(p.get("text", ""))),"raw_scores":{"bm25":raw}}, "bm25", norm[("proposition", p["prop_id"])])
+                self._add_candidate(merged, self._prop_candidate(p, {"bm25":raw}), "bm25", norm[("proposition", p["prop_id"])])
         if "chunk" in search_units:
             chunk_pairs = self.chunk_bm25.topk(question, max(1, bm25_top_k // 2))
             norm = _rank_norm([("chunk", self.chunks[i]["chunk_id"]) for i, _ in chunk_pairs])
@@ -549,7 +623,7 @@ class QueryMedoidRetriever:
                 norm = _rank_norm([("proposition", self.props[idx]["prop_id"]) for idx, _ in pairs])
                 for idx, raw in pairs:
                     p = self.props[int(idx)]
-                    self._add_candidate(merged, {"unit":"proposition","id":p["prop_id"],"title":p["title"],"text":p["text"],"chunk_id":p["chunk_id"],"tokens":p.get("token_count", token_count(p.get("text", ""))),"raw_scores":{"dense":raw}}, "dense", norm[("proposition", p["prop_id"])])
+                    self._add_candidate(merged, self._prop_candidate(p, {"dense":raw}), "dense", norm[("proposition", p["prop_id"])])
             if qv is not None and "chunk" in search_units and self._dense_chunk_matrix is not None:
                 pairs = self._dense_chunk_matrix.search(qv, max(1, dense_top_k // 2))
                 norm = _rank_norm([("chunk", self.chunks[idx]["chunk_id"]) for idx, _ in pairs])
@@ -564,7 +638,7 @@ class QueryMedoidRetriever:
                 for pid, raw in pairs:
                     p = self.prop_by_id.get(pid)
                     if p:
-                        self._add_candidate(merged, {"unit":"proposition","id":pid,"title":p["title"],"text":p["text"],"chunk_id":p["chunk_id"],"tokens":p.get("token_count", token_count(p.get("text", ""))),"raw_scores":{"dense":raw}}, "dense", norm[("proposition", pid)])
+                        self._add_candidate(merged, self._prop_candidate(p, {"dense":raw}), "dense", norm[("proposition", pid)])
             if "chunk" in search_units and "chunk" in self.dense_indexes:
                 pairs = self.dense_indexes["chunk"].search(qvec, max(1, dense_top_k // 2))
                 norm = _rank_norm([("chunk", cid) for cid, _ in pairs])
@@ -573,7 +647,7 @@ class QueryMedoidRetriever:
                     if c:
                         self._add_candidate(merged, {"unit":"chunk","id":cid,"title":c["title"],"text":c["text"],"chunk_id":cid,"tokens":c.get("token_count", token_count(c.get("text", ""))),"raw_scores":{"dense":raw}}, "dense", norm[("chunk", cid)])
 
-        if "entity" in search_units:
+        if "entity" in search_units and self.retrieval_variant=="full_hetero":
             anchors: List[str] = []
             anchors.extend(str(x) for x in metadata.get("_query_anchor_titles",[]) or [])
             for key in ("subj", "s_wiki_title", "title", "entity"):
@@ -591,14 +665,35 @@ class QueryMedoidRetriever:
                 for pid in e.get("proposition_ids", [])[: int(self.cfg.get("entity_anchor_prop_limit", 16))]:
                     p = self.prop_by_id.get(pid)
                     if p:
-                        self._add_candidate(merged, {"unit":"proposition","id":pid,"title":p["title"],"text":p["text"],"chunk_id":p["chunk_id"],"tokens":p.get("token_count", token_count(p.get("text", ""))),"raw_scores":{"entity":anchor_score}}, "entity", anchor_score)
+                        self._add_candidate(merged, self._prop_candidate(p, {"entity":anchor_score}), "entity", anchor_score)
 
         candidates = []
         for c in merged.values():
             comps = c.get("score_components", {})
             c["score"] = w_bm25 * comps.get("bm25", 0.0) + w_dense * comps.get("dense", 0.0) + w_entity * comps.get("entity", 0.0)
+            c["original_candidate_type"] = str(c.get("original_candidate_type") or c.get("unit") or "fallback")
+            c["seed_unit_type"] = self._seed_unit_type(c)
+            c["source_candidate_id"] = c.get("id")
+            c["parent_title"] = c.get("parent_title") or c.get("title")
+            if c.get("unit") == "proposition":
+                mentioned=list(c.get("mentioned_titles") or self.prop_to_mentioned_titles.get(str(c.get("id")),[]) or [])
+                c["mentioned_titles"] = mentioned
+                parent_match=_norm_phrase(c.get("parent_title","")) in query_anchor_norms
+                mention_match=bool({_norm_phrase(t) for t in mentioned} & query_anchor_norms)
+                c["query_anchor_parent_match"] = parent_match
+                c["query_anchor_mention_match"] = mention_match
+                c["anchor_relation_priority"] = 2 if parent_match else (1 if mention_match else 0)
             candidates.append(c)
-        candidates.sort(key=lambda x: x["score"], reverse=True)
+        if self.retrieval_variant in {"prop_parent_anchor","prop_parent_mention_bidirectional"}:
+            def key(c: Mapping[str,Any]):
+                if self.retrieval_variant=="prop_parent_anchor":
+                    priority=1 if c.get("query_anchor_parent_match") else 0
+                else:
+                    priority=int(c.get("anchor_relation_priority",0) or 0)
+                return (priority, float(c.get("score",0.0)))
+            candidates.sort(key=key, reverse=True)
+        else:
+            candidates.sort(key=lambda x: x["score"], reverse=True)
         return candidates[: max(top_k, int(self.cfg.get("min_candidate_pool", top_k)))]
 
     def _sampled_medoid_seeding(self, candidates: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
@@ -717,7 +812,13 @@ class QueryMedoidRetriever:
             "bundle_type":"multi_anchor",
             "anchor_title":"; ".join(anchors),
             "anchor_titles":anchors,
-            "seed":{"unit":"multi_anchor","id":bundle_id,"title":"; ".join(anchors),"text":question},
+            "seed":{"unit":"multi_anchor","id":bundle_id,"title":"; ".join(anchors),"text":question,"seed_unit_type":"multi_anchor"},
+            "seed_unit_type":"multi_anchor",
+            "original_candidate_type":"multi_anchor",
+            "selected_bundle_source_type":"multi_anchor",
+            "source_candidate_id":bundle_id,
+            "parent_title":"; ".join(anchors),
+            "mentioned_titles":[],
             "propositions":selected_props,
             "source_chunks":source_chunks,
             "evidence_path":evidence_path,
@@ -766,7 +867,9 @@ class QueryMedoidRetriever:
                     if len(selected_chunks) >= per_entity_chunks: break
             path = [{"type":"query","id":"q","text":question},{"type":"entity","id":title,"text":title}] + [{"type":"proposition","id":p["prop_id"],"text":p["text"]} for p in selected_props]
             score = float(s.get("score", 0.0)) + sum(jaccard(q_toks, tokenize(p.get("text", ""))) for p in selected_props)
-            bundle={"bundle_id":f"b{len(bundles)}","anchor_title":title,"seed":dict(s),"propositions":[dict(p) for p in selected_props],"source_chunks":[dict(c) for c in selected_chunks],"evidence_path":path,"score":round(score,6),"diagnostics":{"num_props":len(selected_props),"num_chunks":len(selected_chunks),"refinement":"same-title entity hub expansion"}}
+            seed_type=self._seed_unit_type(s)
+            mentioned_titles=sorted({t for p in selected_props for t in self.prop_to_mentioned_titles.get(str(p.get("prop_id","")),[])})
+            bundle={"bundle_id":f"b{len(bundles)}","anchor_title":title,"seed":dict(s),"seed_unit_type":seed_type,"original_candidate_type":str(s.get("original_candidate_type") or s.get("unit") or seed_type),"selected_bundle_source_type":seed_type,"source_candidate_id":s.get("source_candidate_id",s.get("id")),"parent_title":s.get("parent_title",title),"mentioned_titles":mentioned_titles,"propositions":[dict(p) for p in selected_props],"source_chunks":[dict(c) for c in selected_chunks],"evidence_path":path,"score":round(score,6),"diagnostics":{"num_props":len(selected_props),"num_chunks":len(selected_chunks),"refinement":"same-title entity hub expansion","seed_unit_type":seed_type}}
             self._apply_bridge_expansion(bundle, question, q_toks, selected_props, selected_chunks, candidate_scores)
             bundles.append(bundle)
         for c in candidates:
@@ -790,10 +893,14 @@ class QueryMedoidRetriever:
             else:
                 bprops=[]
             bchunks=[dict(chunk)] if chunk else ([dict(c)] if c.get("unit") == "chunk" else [])
-            bundle={"bundle_id":f"b{len(bundles)}","anchor_title":title,"seed":dict(c),"propositions":bprops,"source_chunks":bchunks,"evidence_path":[{"type":"query","id":"q","text":question},{"type":"candidate","id":c.get("id"),"text":c.get("text","")}],"score":round(float(c.get("score",0.0)),6),"diagnostics":{"refinement":"direct-candidate bridge"}}
+            seed_type=self._seed_unit_type(c)
+            mentioned_titles=sorted(set(c.get("mentioned_titles") or [t for p in bprops for t in self.prop_to_mentioned_titles.get(str(p.get("prop_id","")),[])]))
+            bundle={"bundle_id":f"b{len(bundles)}","anchor_title":title,"seed":dict(c),"seed_unit_type":seed_type,"original_candidate_type":str(c.get("original_candidate_type") or c.get("unit") or seed_type),"selected_bundle_source_type":seed_type,"source_candidate_id":c.get("source_candidate_id",c.get("id")),"parent_title":c.get("parent_title",title),"mentioned_titles":mentioned_titles,"propositions":bprops,"source_chunks":bchunks,"evidence_path":[{"type":"query","id":"q","text":question},{"type":"candidate","id":c.get("id"),"text":c.get("text","")}],"score":round(float(c.get("score",0.0)),6),"diagnostics":{"refinement":"direct-candidate bridge","seed_unit_type":seed_type}}
             self._apply_bridge_expansion(bundle, question, q_toks, bprops, bchunks, candidate_scores)
             bundles.append(bundle)
-        bundles=self._order_bundles(question,bundles,query_anchor_info)
+        order_t0=time.perf_counter(); bundles=self._order_bundles(question,bundles,query_anchor_info); order_elapsed=time.perf_counter()-order_t0
+        self._active_stage_durations["anchor_chain_ordering"] += order_elapsed
+        self._active_stage_counts["anchor_chain_ordering"] += 1
         return bundles[:max_bundles]
 
     def _mention_rows_for_prop(self, prop_id: str, source_title: str) -> List[Mapping[str,Any]]:
@@ -977,6 +1084,7 @@ class QueryMedoidRetriever:
         max_props=int(self.bridge_cfg.get("max_bridge_props_per_title",2))
         anchor=str(bundle.get("anchor_title",""))
         bridge_rows=[]; seen_titles=set()
+        mention_t0=time.perf_counter()
         for prop in self._bridge_source_props(base_props, anchor):
             for row in self._mention_rows_for_prop(str(prop.get("prop_id","")), str(prop.get("title",""))):
                 title=str(row.get("mentioned_title",""))
@@ -987,6 +1095,9 @@ class QueryMedoidRetriever:
                     break
             if len(bridge_rows)>=max_titles:
                 break
+        mention_elapsed=time.perf_counter()-mention_t0
+        self._active_stage_durations["mention_bridge_expansion"] += mention_elapsed
+        self._active_stage_counts["mention_bridge_expansion"] += 1
         if not bridge_rows:
             return
         existing_prop_ids={str(p.get("prop_id")) for p in bundle.get("propositions",[]) if p.get("prop_id")}
@@ -996,7 +1107,11 @@ class QueryMedoidRetriever:
             title=str(row.get("mentioned_title",""))
             residual_terms=build_residual_query(question, anchor, title, str(source_prop.get("text","")))
             candidates=list(self.props_by_title.get(title,[]))
+            residual_t0=time.perf_counter()
             ranked_candidates=self._rank_bridge_props(candidates,residual_terms,q_toks)
+            residual_elapsed=time.perf_counter()-residual_t0
+            self._active_stage_durations["residual_bridge_selection"] += residual_elapsed
+            self._active_stage_counts["residual_bridge_selection"] += 1
             selected=[]
             selected_info=[]
             for prop,info in ranked_candidates:
@@ -1049,7 +1164,10 @@ class QueryMedoidRetriever:
         bundle["evidence_path"]=list(bundle.get("evidence_path",[]))+bridge_paths
         bundle["score"]=round(float(bundle.get("score",0.0))+sum(self._bridge_prop_score(p,q_toks,candidate_scores) for p in bridge_props),6)
         diag=dict(bundle.get("diagnostics",{}))
-        diag.update({"bridge_titles":len(bridge_titles),"bridge_prop_count":len(bridge_props),"bridge_connected":bridge_connected,"answer_slot_aligned":answer_slot_aligned,"chain_complete_v2":bundle["chain_complete_v2"],"residual_coverage_count":total_residual_coverage,"residual_query":bundle["residual_query"],"refinement":"same-title + mention-bridge residual expansion"})
+        timing=dict(diag.get("timing",{}) or {})
+        timing["mention_bridge_expansion_s"]=round(mention_elapsed,6)
+        timing["residual_bridge_selection_s"]=round(self._active_stage_durations.get("residual_bridge_selection",0.0),6)
+        diag.update({"bridge_titles":len(bridge_titles),"bridge_prop_count":len(bridge_props),"bridge_connected":bridge_connected,"answer_slot_aligned":answer_slot_aligned,"chain_complete_v2":bundle["chain_complete_v2"],"residual_coverage_count":total_residual_coverage,"residual_query":bundle["residual_query"],"refinement":"same-title + mention-bridge residual expansion","timing":timing})
         bundle["diagnostics"]=diag
 
     def _exact_anchor_match(self, question: str, title: str) -> bool:

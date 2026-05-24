@@ -20,6 +20,7 @@ indexing:
     enabled: false
 
 retrieval:
+  retrieval_variant: full_hetero
   random_seed: 13
   search_units: [proposition, chunk, entity]
   candidate_top_k: 40
