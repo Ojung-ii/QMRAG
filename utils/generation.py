@@ -12,6 +12,20 @@ RENDERING_PROFILES = (
     "multi_anchor_table",
 )
 
+COMPACTION_PROFILES = (
+    "none",
+    "chain_dedup",
+    "chain_skeleton",
+    "chain_plus1",
+    "sentence_cap",
+    "top3_chain_dedup",
+    "chain_dedup_no_sources",
+    "chain_dedup_plus1_no_sources",
+    "sentence_cap_no_sources",
+    "top3_chain_dedup_no_sources",
+    "chain_skeleton_no_sources",
+)
+
 PROMPT_TEMPLATES = {
     "common_qa": """You are a QA assistant.
 Answer the question using only the provided Context.
@@ -239,6 +253,170 @@ def _append_unique_sentence(lines: list[str], seen: set[str], title: str, text: 
     else:
         lines.append(f"{prefix}{sentence}")
 
+def _sentence_norm(text: Any) -> str:
+    value=str(text or "").lower()
+    value=re.sub(r"[^a-z0-9]+"," ",value)
+    return " ".join(value.split())
+
+def _record(title: Any, text: Any, role: str, priority: int, source_id: Any = None) -> dict[str,Any] | None:
+    sentence=str(text or "").strip()
+    if not sentence:
+        return None
+    return {
+        "title":str(title or "").strip(),
+        "text":sentence,
+        "role":role,
+        "priority":int(priority),
+        "source_id":str(source_id or "").strip(),
+        "norm":_sentence_norm(sentence),
+    }
+
+def _chain_records(bundle: Mapping[str,Any]) -> list[dict[str,Any]]:
+    records=[]
+    for path in _bridge_paths(bundle):
+        seed=_record(path.get("source_title") or bundle.get("anchor_title"), path.get("seed_prop"), "chain_seed", 0, path.get("seed_prop_id"))
+        bridge=_record(path.get("bridge_title"), path.get("bridge_prop"), "chain_bridge", 1, path.get("bridge_prop_id"))
+        if seed: records.append(seed)
+        if bridge: records.append(bridge)
+    return records
+
+def _prop_records(bundle: Mapping[str,Any], chain_norms: set[str] | None = None) -> list[dict[str,Any]]:
+    chain_norms=chain_norms or set()
+    records=[]
+    for p in bundle.get("propositions",[]) or []:
+        rec=_record(p.get("title") or bundle.get("anchor_title"), p.get("text"), "support", 3, p.get("prop_id"))
+        if not rec or rec["norm"] in chain_norms:
+            continue
+        for score_key in ("residual_score","original_relevance_score","score","relevance_score"):
+            if p.get(score_key) is not None:
+                try:
+                    rec["score"]=float(p.get(score_key) or 0.0)
+                except Exception:
+                    rec["score"]=0.0
+                break
+        if bundle.get("answer_slot_aligned") or int(bundle.get("residual_coverage_count",0) or 0)>0:
+            rec["role"]="answer_slot_support"; rec["priority"]=2
+        elif bundle.get("anchor_connected"):
+            rec["role"]="anchor_support"; rec["priority"]=3
+        records.append(rec)
+    return records
+
+def _source_records(bundle: Mapping[str,Any], chain_norms: set[str] | None = None, limit_per_chunk: int = 2) -> list[dict[str,Any]]:
+    chain_norms=chain_norms or set()
+    records=[]
+    for c in bundle.get("source_chunks",[]) or []:
+        for sent in sentence_split(str(c.get("text","")))[:limit_per_chunk]:
+            rec=_record(c.get("title") or bundle.get("anchor_title"), sent, "source", 5, c.get("chunk_id"))
+            if rec and rec["norm"] not in chain_norms:
+                records.append(rec)
+    return records
+
+def _bundle_sentence_records(bundle: Mapping[str,Any], include_sources: bool = True) -> list[dict[str,Any]]:
+    chain=_chain_records(bundle)
+    chain_norms={r["norm"] for r in chain if r.get("norm")}
+    props=_prop_records(bundle, chain_norms)
+    records=chain+props
+    if include_sources:
+        records.extend(_source_records(bundle, {r["norm"] for r in records if r.get("norm")}))
+    return records
+
+def _append_record(lines: list[str], seen: set[str], rec: Mapping[str,Any], prefix: str = "- ") -> bool:
+    norm=str(rec.get("norm") or _sentence_norm(rec.get("text")))
+    if not norm or norm in seen:
+        return False
+    seen.add(norm)
+    title=str(rec.get("title") or "").strip()
+    text=str(rec.get("text") or "").strip()
+    if title:
+        lines.append(f"{prefix}{title}: {text}")
+    else:
+        lines.append(f"{prefix}{text}")
+    return True
+
+def _metadata_removed_count(bundles: Sequence[Mapping[str,Any]]) -> int:
+    count=0
+    bundle_keys=(
+        "score","ordering_group","anchor_connected","chain_complete","chain_complete_v2",
+        "anchor_connected_chain_complete","answer_slot_aligned","bridge_connected",
+        "is_relation_title_bundle","is_generic_relation_title","exact_anchor_match",
+        "residual_coverage_count","avg_residual_coverage_count",
+    )
+    for bundle in bundles or []:
+        count+=sum(1 for key in bundle_keys if bundle.get(key) not in (None,"",False,[],{}))
+        for path in bundle.get("evidence_path",[]) or []:
+            if not isinstance(path,Mapping):
+                continue
+            count+=sum(1 for key in ("seed_prop_id","bridge_prop_id","path_type","score","residual_coverage_count") if path.get(key) not in (None,"",False,[],{}))
+        for prop in bundle.get("propositions",[]) or []:
+            if not isinstance(prop,Mapping):
+                continue
+            count+=sum(1 for key in ("prop_id","score","rank","chunk_id","residual_score","original_relevance_score") if prop.get(key) not in (None,"",False,[],{}))
+        for chunk in bundle.get("source_chunks",[]) or []:
+            if not isinstance(chunk,Mapping):
+                continue
+            count+=sum(1 for key in ("chunk_id","score","rank") if chunk.get(key) not in (None,"",False,[],{}))
+    return count
+
+def rendered_sentence_count(text: Any) -> int:
+    count=0
+    for line in str(text or "").splitlines():
+        stripped=line.strip()
+        if not stripped or stripped.endswith(":"):
+            continue
+        if stripped.startswith("[") and stripped.endswith("]"):
+            continue
+        if stripped.startswith(("Anchor:","Bridge:","Sources:","Supporting Propositions:","Chain:","Title:","Evidence Chain:","Supporting Evidence:","Multi-Anchor Evidence:")):
+            continue
+        if stripped.startswith("- "):
+            count+=1
+        elif sentence_split(stripped):
+            count+=len(sentence_split(stripped))
+    return count
+
+def bundle_sentence_statistics(evidence_bundles: Sequence[Mapping[str,Any]], rendered_context: Any = None) -> dict[str,Any]:
+    bundles=list(evidence_bundles or [])
+    per_bundle=[]
+    all_norms=[]
+    chain_count=0
+    support_count=0
+    source_count=0
+    multi_anchor_count=0
+    for bundle in bundles:
+        records=_bundle_sentence_records(bundle, include_sources=True)
+        per_bundle.append(len(records))
+        for rec in records:
+            norm=str(rec.get("norm") or "")
+            if norm:
+                all_norms.append(norm)
+            role=str(rec.get("role") or "")
+            if role.startswith("chain_"):
+                chain_count+=1
+            elif role=="source":
+                source_count+=1
+            else:
+                support_count+=1
+        if bundle.get("bundle_type")=="multi_anchor":
+            multi_anchor_count+=len([r for r in records if r.get("role")!="source"])
+    duplicate_count=max(0,len(all_norms)-len(set(all_norms)))
+    rendered_count=rendered_sentence_count(rendered_context) if rendered_context is not None else sum(per_bundle)
+    bundle_count=len(bundles)
+    top1=sum(per_bundle[:1])
+    top3=sum(per_bundle[:3])
+    return {
+        "bundle_count":bundle_count,
+        "rendered_sentence_count":rendered_count,
+        "avg_sentences_per_bundle":sum(per_bundle)/max(1,bundle_count),
+        "max_sentences_per_bundle":max(per_bundle or [0]),
+        "top1_bundle_sentence_count":top1,
+        "top3_bundle_sentence_count":top3,
+        "chain_sentence_count":chain_count,
+        "support_sentence_count":support_count,
+        "duplicate_sentence_count":duplicate_count,
+        "duplicate_sentence_rate":duplicate_count/max(1,len(all_norms)),
+        "source_sentence_count":source_count,
+        "multi_anchor_sentence_count":multi_anchor_count,
+    }
+
 def _source_title_for_bundle(bundle: Mapping[str,Any]) -> str:
     return str(bundle.get("anchor_title") or bundle.get("title") or "").strip()
 
@@ -412,19 +590,305 @@ def _render_multi_anchor_table(bundles: Sequence[Mapping[str,Any]], max_chars: i
             parts.append("")
     return safe_truncate("\n".join(parts).strip(), max_chars)
 
+def _source_refs(bundle: Mapping[str,Any]) -> str:
+    refs=[]
+    for c in bundle.get("source_chunks",[]) or []:
+        title=str(c.get("title") or "").strip()
+        chunk_id=str(c.get("chunk_id") or "").strip()
+        if title or chunk_id:
+            refs.append(f"{title} | {chunk_id}".strip(" |"))
+    return "; ".join(dict.fromkeys(refs))
+
+def _render_chain_dedup(bundles: Sequence[Mapping[str,Any]], max_chars: int) -> str:
+    parts=[]
+    seen:set[str]=set()
+    for i,bundle in enumerate(_ordered_bundles(bundles), start=1):
+        if bundle.get("bundle_type")=="multi_anchor":
+            anchors="; ".join(str(x) for x in bundle.get("anchor_titles",[]) or [])
+            parts.append(f"[Multi-Anchor Evidence {i} | anchors={anchors} | complete={bool(bundle.get('multi_anchor_complete'))}]")
+            appended=False
+            for rec in _prop_records(bundle):
+                appended=_append_record(parts,seen,rec) or appended
+            if not appended:
+                for rec in _source_records(bundle,limit_per_chunk=1):
+                    _append_record(parts,seen,rec)
+            parts.append("")
+            continue
+        bridge=", ".join(str(x) for x in bundle.get("bridge_titles",[]) or [])
+        if _bridge_paths(bundle):
+            parts.append(f"[Evidence Chain {i} | anchor_connected={bool(bundle.get('anchor_connected'))} | chain_complete_v2={bool(bundle.get('chain_complete_v2',bundle.get('chain_complete')))}]")
+            parts.append(f"Anchor: {bundle.get('anchor_title')}")
+            if bridge:
+                parts.append(f"Bridge: {bridge}")
+            parts.append("Chain:")
+            for rec in _chain_records(bundle):
+                _append_record(parts,seen,rec)
+            support_records=_prop_records(bundle,{r.get("norm","") for r in _chain_records(bundle)})
+            if support_records:
+                parts.append("Supporting Propositions:")
+                for rec in support_records:
+                    _append_record(parts,seen,rec)
+        else:
+            parts.append(f"[Supporting Evidence {i} | anchor={bundle.get('anchor_title')} | relation_title={bool(bundle.get('is_relation_title_bundle'))}]")
+            appended=False
+            for rec in _prop_records(bundle):
+                appended=_append_record(parts,seen,rec) or appended
+            if not appended:
+                for rec in _source_records(bundle,limit_per_chunk=1):
+                    _append_record(parts,seen,rec)
+        refs=_source_refs(bundle)
+        if refs:
+            parts.append(f"Sources: {refs}")
+        parts.append("")
+    return safe_truncate("\n".join(parts).strip(), max_chars)
+
+def _support_records_for_compact(bundle: Mapping[str,Any], chain: Sequence[Mapping[str,Any]], limit: int | None = None) -> list[dict[str,Any]]:
+    chain_norms={str(r.get("norm") or "") for r in chain if r.get("norm")}
+    records=_prop_records(bundle,chain_norms)
+    records=sorted(records,key=lambda rec:(int(rec.get("priority",9)), -float(rec.get("score",0.0) or 0.0), len(str(rec.get("text","")))))
+    if limit is None:
+        return records
+    return records[:max(0,int(limit))]
+
+def _render_multi_anchor_no_sources(parts: list[str], seen: set[str], bundle: Mapping[str,Any], i: int, per_anchor_limit: int | None = None) -> None:
+    anchors=[str(x) for x in bundle.get("anchor_titles",[]) or []]
+    if anchors:
+        parts.append(f"Multi-Anchor Evidence {i}: " + "; ".join(anchors))
+    else:
+        parts.append(f"Multi-Anchor Evidence {i}:")
+    by_title: dict[str,list[dict[str,Any]]]={}
+    for rec in _prop_records(bundle):
+        by_title.setdefault(str(rec.get("title") or ""),[]).append(rec)
+    anchor_order=anchors or list(by_title.keys())
+    appended=False
+    for title in anchor_order:
+        candidates=sorted(by_title.get(title,[]),key=lambda rec:(int(rec.get("priority",9)), -float(rec.get("score",0.0) or 0.0), len(str(rec.get("text","")))))
+        if per_anchor_limit is not None:
+            candidates=candidates[:max(0,int(per_anchor_limit))]
+        for rec in candidates:
+            appended=_append_record(parts,seen,rec) or appended
+    if not appended:
+        for records in by_title.values():
+            for rec in records[:1]:
+                _append_record(parts,seen,rec)
+    parts.append("")
+
+def _render_chain_dedup_no_sources(
+    bundles: Sequence[Mapping[str,Any]],
+    max_chars: int,
+    support_limit: int | None = None,
+) -> str:
+    parts=[]
+    seen:set[str]=set()
+    for i,bundle in enumerate(_ordered_bundles(bundles), start=1):
+        if bundle.get("bundle_type")=="multi_anchor":
+            _render_multi_anchor_no_sources(parts,seen,bundle,i,per_anchor_limit=None if support_limit is None else 1)
+            continue
+        bridge=", ".join(str(x) for x in bundle.get("bridge_titles",[]) or [])
+        chain=_chain_records(bundle)
+        if chain:
+            anchor=str(bundle.get("anchor_title") or "").strip()
+            parts.append(f"Evidence Chain {i}: {anchor}" if anchor else f"Evidence Chain {i}:")
+            if bridge:
+                parts.append(f"Bridge: {bridge}")
+            parts.append("Chain:")
+            for rec in chain:
+                _append_record(parts,seen,rec)
+            support_records=_support_records_for_compact(bundle,chain,limit=support_limit)
+            if support_records:
+                parts.append("Supporting Evidence:")
+                for rec in support_records:
+                    _append_record(parts,seen,rec)
+        else:
+            support_records=_support_records_for_compact(bundle,[],limit=support_limit)
+            if not support_records:
+                continue
+            anchor=str(bundle.get("anchor_title") or bundle.get("title") or "").strip()
+            parts.append(f"Supporting Evidence {i}: {anchor}" if anchor else f"Supporting Evidence {i}:")
+            for rec in support_records:
+                _append_record(parts,seen,rec)
+        parts.append("")
+    return safe_truncate("\n".join(parts).strip(), max_chars)
+
+def _append_skeleton_bundle(parts: list[str], seen: set[str], bundle: Mapping[str,Any], include_plus_one: bool = False) -> None:
+    if bundle.get("bundle_type")=="multi_anchor":
+        parts.append("[Multi-Anchor Evidence]")
+        by_title: dict[str,dict[str,Any]]={}
+        for rec in _prop_records(bundle):
+            by_title.setdefault(str(rec.get("title") or ""), rec)
+        if not by_title:
+            for rec in _source_records(bundle,limit_per_chunk=1):
+                by_title.setdefault(str(rec.get("title") or ""), rec)
+        for rec in by_title.values():
+            _append_record(parts,seen,rec)
+        parts.append("")
+        return
+    chain=_chain_records(bundle)
+    if chain:
+        bridge=", ".join(str(x) for x in bundle.get("bridge_titles",[]) or [])
+        header=f"Evidence Chain: {bundle.get('anchor_title')}"
+        if bridge:
+            header+=f" -> {bridge}"
+        parts.append(header)
+        seed_added=False
+        bridge_added=False
+        for rec in chain:
+            role=str(rec.get("role") or "")
+            if role=="chain_seed" and not seed_added:
+                seed_added=_append_record(parts,seen,rec)
+            elif role=="chain_bridge" and not bridge_added:
+                bridge_added=_append_record(parts,seen,rec)
+            if seed_added and bridge_added:
+                break
+        if include_plus_one:
+            support=sorted(_prop_records(bundle,{r.get("norm","") for r in chain}), key=lambda r:(int(r.get("priority",9)), len(str(r.get("text","")))))
+            for rec in support:
+                if _append_record(parts,seen,rec):
+                    break
+        parts.append("")
+
+def _render_chain_skeleton(bundles: Sequence[Mapping[str,Any]], max_chars: int, include_plus_one: bool = False) -> str:
+    parts=[]
+    seen:set[str]=set()
+    for bundle in _ordered_bundles(bundles):
+        if _bridge_paths(bundle) or bundle.get("bundle_type")=="multi_anchor":
+            _append_skeleton_bundle(parts,seen,bundle,include_plus_one=include_plus_one)
+    return safe_truncate("\n".join(parts).strip(), max_chars)
+
+def _render_chain_skeleton_no_sources(bundles: Sequence[Mapping[str,Any]], max_chars: int) -> str:
+    parts=[]
+    seen:set[str]=set()
+    for bundle in _ordered_bundles(bundles):
+        if bundle.get("bundle_type")=="multi_anchor":
+            _render_multi_anchor_no_sources(parts,seen,bundle,len(parts)+1,per_anchor_limit=1)
+            continue
+        chain=_chain_records(bundle)
+        if not chain:
+            continue
+        bridge=", ".join(str(x) for x in bundle.get("bridge_titles",[]) or [])
+        anchor=str(bundle.get("anchor_title") or "").strip()
+        parts.append(f"Evidence Chain: {anchor}" if anchor else "Evidence Chain:")
+        if bridge:
+            parts.append(f"Bridge: {bridge}")
+        seed_added=False
+        bridge_added=False
+        for rec in chain:
+            role=str(rec.get("role") or "")
+            if role=="chain_seed" and not seed_added:
+                seed_added=_append_record(parts,seen,rec)
+            elif role=="chain_bridge" and not bridge_added:
+                bridge_added=_append_record(parts,seen,rec)
+            if seed_added and bridge_added:
+                break
+        parts.append("")
+    return safe_truncate("\n".join(parts).strip(), max_chars)
+
+def _render_sentence_cap(bundles: Sequence[Mapping[str,Any]], max_chars: int, max_sentences_per_bundle: int = 3) -> str:
+    parts=[]
+    seen:set[str]=set()
+    cap=max(1,int(max_sentences_per_bundle or 3))
+    for i,bundle in enumerate(_ordered_bundles(bundles), start=1):
+        bridge=", ".join(str(x) for x in bundle.get("bridge_titles",[]) or [])
+        if bundle.get("bundle_type")=="multi_anchor":
+            anchors="; ".join(str(x) for x in bundle.get("anchor_titles",[]) or [])
+            parts.append(f"[Multi-Anchor Evidence {i} | anchors={anchors}]")
+        elif _bridge_paths(bundle):
+            parts.append(f"[Evidence Chain {i} | anchor_connected={bool(bundle.get('anchor_connected'))} | chain_complete_v2={bool(bundle.get('chain_complete_v2',bundle.get('chain_complete')))}]")
+            parts.append(f"Anchor: {bundle.get('anchor_title')}")
+            if bridge:
+                parts.append(f"Bridge: {bridge}")
+        else:
+            parts.append(f"[Supporting Evidence {i} | anchor={bundle.get('anchor_title')}]")
+        records=_bundle_sentence_records(bundle,include_sources=True)
+        records=sorted(records,key=lambda rec:(int(rec.get("priority",9)), 0 if rec.get("role")!="source" else 1))
+        kept=0
+        for rec in records:
+            if _append_record(parts,seen,rec):
+                kept+=1
+            if kept>=cap:
+                break
+        parts.append("")
+    return safe_truncate("\n".join(parts).strip(), max_chars)
+
+def _render_sentence_cap_no_sources(bundles: Sequence[Mapping[str,Any]], max_chars: int, max_sentences_per_bundle: int = 3) -> str:
+    parts=[]
+    seen:set[str]=set()
+    cap=max(1,int(max_sentences_per_bundle or 3))
+    for i,bundle in enumerate(_ordered_bundles(bundles), start=1):
+        records=_bundle_sentence_records(bundle,include_sources=False)
+        records=sorted(records,key=lambda rec:(int(rec.get("priority",9)), -float(rec.get("score",0.0) or 0.0), len(str(rec.get("text","")))))
+        if not records:
+            continue
+        bridge=", ".join(str(x) for x in bundle.get("bridge_titles",[]) or [])
+        if bundle.get("bundle_type")=="multi_anchor":
+            anchors="; ".join(str(x) for x in bundle.get("anchor_titles",[]) or [])
+            parts.append(f"Multi-Anchor Evidence {i}: {anchors}" if anchors else f"Multi-Anchor Evidence {i}:")
+        elif _bridge_paths(bundle):
+            anchor=str(bundle.get("anchor_title") or "").strip()
+            parts.append(f"Evidence Chain {i}: {anchor}" if anchor else f"Evidence Chain {i}:")
+            if bridge:
+                parts.append(f"Bridge: {bridge}")
+        else:
+            anchor=str(bundle.get("anchor_title") or bundle.get("title") or "").strip()
+            parts.append(f"Supporting Evidence {i}: {anchor}" if anchor else f"Supporting Evidence {i}:")
+        kept=0
+        for rec in records:
+            if _append_record(parts,seen,rec):
+                kept+=1
+            if kept>=cap:
+                break
+        parts.append("")
+    return safe_truncate("\n".join(parts).strip(), max_chars)
+
+def _render_compacted_context(
+    bundles: Sequence[Mapping[str,Any]],
+    max_chars: int,
+    compaction_profile: str,
+    max_sentences_per_bundle: int = 3,
+) -> str:
+    profile=str(compaction_profile or "none")
+    if profile=="chain_dedup":
+        return _render_chain_dedup(bundles,max_chars)
+    if profile=="chain_dedup_no_sources":
+        return _render_chain_dedup_no_sources(bundles,max_chars,support_limit=None)
+    if profile=="chain_skeleton":
+        return _render_chain_skeleton(bundles,max_chars,include_plus_one=False)
+    if profile=="chain_skeleton_no_sources":
+        return _render_chain_skeleton_no_sources(bundles,max_chars)
+    if profile=="chain_plus1":
+        return _render_chain_skeleton(bundles,max_chars,include_plus_one=True)
+    if profile=="chain_dedup_plus1_no_sources":
+        return _render_chain_dedup_no_sources(bundles,max_chars,support_limit=1)
+    if profile=="sentence_cap":
+        return _render_sentence_cap(bundles,max_chars,max_sentences_per_bundle=max_sentences_per_bundle)
+    if profile=="sentence_cap_no_sources":
+        return _render_sentence_cap_no_sources(bundles,max_chars,max_sentences_per_bundle=max_sentences_per_bundle)
+    if profile=="top3_chain_dedup":
+        return _render_chain_dedup(_ordered_bundles(bundles)[:3],max_chars)
+    if profile=="top3_chain_dedup_no_sources":
+        return _render_chain_dedup_no_sources(_ordered_bundles(bundles)[:3],max_chars,support_limit=None)
+    raise ValueError(f"Unsupported compaction_profile={profile!r}; choices={list(COMPACTION_PROFILES)}")
+
 def render_context(
     evidence_bundles: Sequence[Mapping[str,Any]],
     rendering_profile: str = DEFAULT_RENDERING_PROFILE,
     max_chars: int = 24000,
     token_budget: int | None = None,
+    compaction_profile: str = "none",
+    max_sentences_per_bundle: int = 3,
     **_: Any,
 ) -> str:
     profile=str(rendering_profile or DEFAULT_RENDERING_PROFILE)
     if profile not in RENDERING_PROFILES:
         raise ValueError(f"Unsupported rendering_profile={profile!r}; choices={list(RENDERING_PROFILES)}")
+    compact=str(compaction_profile or "none")
+    if compact not in COMPACTION_PROFILES:
+        raise ValueError(f"Unsupported compaction_profile={compact!r}; choices={list(COMPACTION_PROFILES)}")
     char_budget=int(max_chars or 24000)
     if token_budget:
         char_budget=min(char_budget, int(token_budget)*6)
+    if compact!="none":
+        return _render_compacted_context(evidence_bundles,char_budget,compact,max_sentences_per_bundle=max_sentences_per_bundle)
     if profile=="structured_chain":
         return _render_structured_chain(evidence_bundles,char_budget)
     if profile=="plain_evidence":
@@ -434,6 +898,38 @@ def render_context(
     if profile=="multi_anchor_table":
         return _render_multi_anchor_table(evidence_bundles,char_budget)
     raise AssertionError(profile)
+
+def render_context_with_metadata(
+    evidence_bundles: Sequence[Mapping[str,Any]],
+    rendering_profile: str = DEFAULT_RENDERING_PROFILE,
+    max_chars: int = 24000,
+    token_budget: int | None = None,
+    compaction_profile: str = "none",
+    max_sentences_per_bundle: int = 3,
+) -> tuple[str,dict[str,Any]]:
+    original_stats=bundle_sentence_statistics(evidence_bundles)
+    context=render_context(
+        evidence_bundles,
+        rendering_profile=rendering_profile,
+        max_chars=max_chars,
+        token_budget=token_budget,
+        compaction_profile=compaction_profile,
+        max_sentences_per_bundle=max_sentences_per_bundle,
+    )
+    rendered_stats=bundle_sentence_statistics(evidence_bundles,context)
+    stats=dict(rendered_stats)
+    compact=str(compaction_profile or "none")
+    no_sources="no_sources" in compact
+    stats.update({
+        "original_sentence_count":original_stats.get("rendered_sentence_count",0),
+        "dropped_sentence_count":max(0,int(original_stats.get("rendered_sentence_count",0) or 0)-int(rendered_stats.get("rendered_sentence_count",0) or 0)),
+        "duplicate_removed_count":max(0,int(original_stats.get("duplicate_sentence_count",0) or 0)-int(rendered_stats.get("duplicate_sentence_count",0) or 0)),
+        "source_removed_count":int(original_stats.get("source_sentence_count",0) or 0) if no_sources else 0,
+        "metadata_removed_count":_metadata_removed_count(evidence_bundles) if no_sources else 0,
+        "compaction_profile":compact,
+        "max_sentences_per_bundle":int(max_sentences_per_bundle or 3),
+    })
+    return context,stats
 
 def build_context_text(bundles: Sequence[Mapping[str,Any]], max_chars: int=24000, rendering_profile: str=DEFAULT_RENDERING_PROFILE) -> str:
     return render_context(bundles, rendering_profile=rendering_profile, max_chars=max_chars)
@@ -461,7 +957,14 @@ def build_generation_prompt(question: str, bundles: Sequence[Mapping[str,Any]], 
     cfg=cfg or {}
     prompt_profile=str(cfg.get("prompt_profile") or DEFAULT_PROMPT_PROFILE)
     rendering_profile=str(cfg.get("rendering_profile") or DEFAULT_RENDERING_PROFILE)
-    context=render_context(bundles, rendering_profile, int(cfg.get("max_context_chars",24000)), cfg.get("context_token_budget"))
+    context=render_context(
+        bundles,
+        rendering_profile,
+        int(cfg.get("max_context_chars",24000)),
+        cfg.get("context_token_budget"),
+        compaction_profile=str(cfg.get("compaction_profile") or "none"),
+        max_sentences_per_bundle=int(cfg.get("max_sentences_per_bundle",3) or 3),
+    )
     return build_prompt(question, context, prompt_profile), prompt_profile, context
 
 def extractive_fallback_answer(question: str, bundles: Sequence[Mapping[str,Any]]) -> str:

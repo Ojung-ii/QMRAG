@@ -25,7 +25,17 @@ from scripts.analyze_failures import (
     summarize_prediction_file,
 )
 from utils.eval_metrics import evaluate_predictions, summary_markdown
-from utils.generation import DEFAULT_RENDERING_PROFILE, PROMPT_TEMPLATES, RENDERING_PROFILES, add_token_accounting_fields, build_prompt, normalize_prediction_for_eval, render_context
+from utils.generation import (
+    COMPACTION_PROFILES,
+    DEFAULT_RENDERING_PROFILE,
+    PROMPT_TEMPLATES,
+    RENDERING_PROFILES,
+    add_token_accounting_fields,
+    build_prompt,
+    normalize_prediction_for_eval,
+    render_context,
+    render_context_with_metadata,
+)
 from utils.io_utils import dump_json, load_yaml, read_jsonl, write_jsonl
 from utils.text import token_count, safe_truncate
 
@@ -75,7 +85,12 @@ def find_latest_prediction_with_rendering(
                 first = read_jsonl(path)[0]
             except Exception:
                 first = {}
-            if first.get("context_truncation_enabled") or first.get("top_bundles") is not None or first.get("context_token_budget") is not None:
+            if (
+                first.get("context_truncation_enabled")
+                or first.get("top_bundles") is not None
+                or first.get("context_token_budget") is not None
+                or str(first.get("compaction_profile") or "none") != "none"
+            ):
                 continue
         candidates.append(summary)
     if not candidates:
@@ -84,7 +99,9 @@ def find_latest_prediction_with_rendering(
     return max(candidates, key=lambda x: (float(x["mtime"]), str(x["path"])))["path"]
 
 
-def prompt_experiment_type(source_prompt: str, target_prompt: str, rendering_changed: bool, context_truncation: bool = False) -> str:
+def prompt_experiment_type(source_prompt: str, target_prompt: str, rendering_changed: bool, context_truncation: bool = False, context_compaction: bool = False) -> str:
+    if context_compaction:
+        return "context_compaction_replay"
     if context_truncation:
         return "context_budget_replay"
     if rendering_changed:
@@ -111,31 +128,56 @@ def render_context_with_truncation(
     top_bundles: int | None,
     context_token_budget: int | None,
     ordering_source: str,
-) -> tuple[str, list[Mapping[str, Any]], int]:
+    compaction_profile: str = "none",
+    max_sentences_per_bundle: int = 3,
+) -> tuple[str, list[Mapping[str, Any]], int, dict[str, Any]]:
     original_bundles = list(bundles)
     ordered = ordered_bundles_for_context(original_bundles, ordering_source)
     candidates = ordered[: max(0, int(top_bundles))] if top_bundles is not None else ordered
     max_chars = int(cfg.get("max_context_chars", 24000))
     token_budget = cfg.get("context_token_budget")
     if context_token_budget is None:
-        context = render_context(candidates, rendering_profile=target_rendering, max_chars=max_chars, token_budget=token_budget)
-        return context, list(candidates), max(0, len(original_bundles) - len(candidates))
+        context, stats = render_context_with_metadata(
+            candidates,
+            rendering_profile=target_rendering,
+            max_chars=max_chars,
+            token_budget=token_budget,
+            compaction_profile=compaction_profile,
+            max_sentences_per_bundle=max_sentences_per_bundle,
+        )
+        return context, list(candidates), max(0, len(original_bundles) - len(candidates)), stats
     selected: list[Mapping[str, Any]] = []
     context = ""
+    stats: dict[str, Any] = {}
     for bundle in candidates:
         trial = selected + [bundle]
-        trial_context = render_context(trial, rendering_profile=target_rendering, max_chars=max_chars, token_budget=None)
+        trial_context, trial_stats = render_context_with_metadata(
+            trial,
+            rendering_profile=target_rendering,
+            max_chars=max_chars,
+            token_budget=None,
+            compaction_profile=compaction_profile,
+            max_sentences_per_bundle=max_sentences_per_bundle,
+        )
         trial_tokens = token_count(trial_context)
         if trial_tokens > int(context_token_budget) and selected:
             break
         selected = trial
         context = trial_context
+        stats = trial_stats
         if trial_tokens >= int(context_token_budget):
             break
     if not selected and candidates:
         selected = [candidates[0]]
-        context = render_context(selected, rendering_profile=target_rendering, max_chars=max_chars, token_budget=None)
-    return context, selected, max(0, len(original_bundles) - len(selected))
+        context, stats = render_context_with_metadata(
+            selected,
+            rendering_profile=target_rendering,
+            max_chars=max_chars,
+            token_budget=None,
+            compaction_profile=compaction_profile,
+            max_sentences_per_bundle=max_sentences_per_bundle,
+        )
+    return context, selected, max(0, len(original_bundles) - len(selected)), stats
 
 
 def resolve_model(client: Any, configured: str) -> str:
@@ -204,6 +246,8 @@ def replay_rows(
     top_bundles: int | None = None,
     context_token_budget: int | None = None,
     ordering_source: str = "current",
+    compaction_profile: str = "none",
+    max_sentences_per_bundle: int = 3,
 ) -> list[dict[str, Any]]:
     out = []
     selected = list(rows)
@@ -213,7 +257,10 @@ def replay_rows(
         selected = selected[:sample]
     if limit is not None:
         selected = selected[:limit]
-    context_truncation = top_bundles is not None or context_token_budget is not None or ordering_source != "current"
+    compaction_profile = str(compaction_profile or "none")
+    effective_top_bundles = 3 if compaction_profile in {"top3_chain_dedup", "top3_chain_dedup_no_sources"} and top_bundles is None else top_bundles
+    context_truncation = effective_top_bundles is not None or context_token_budget is not None or ordering_source != "current"
+    context_compaction = compaction_profile != "none"
     rendering_changed = rerender_context and (target_rendering != source_rendering or any(str(row.get("rendering_profile") or source_rendering) != target_rendering for row in selected))
     for row in selected:
         source_context = context_from_row(row)
@@ -225,21 +272,26 @@ def replay_rows(
         original_bundle_count = len(row.get("evidence_bundles", []) or [])
         rendered_bundles = list(row.get("evidence_bundles", []) or [])
         dropped_bundle_count = 0
-        if context_truncation:
-            context, rendered_bundles, dropped_bundle_count = render_context_with_truncation(
+        compaction_stats: dict[str, Any] = {}
+        if context_truncation or context_compaction:
+            context, rendered_bundles, dropped_bundle_count, compaction_stats = render_context_with_truncation(
                 row.get("evidence_bundles", []) or [],
                 target_rendering,
                 cfg,
-                top_bundles,
+                effective_top_bundles,
                 context_token_budget,
                 ordering_source,
+                compaction_profile=compaction_profile,
+                max_sentences_per_bundle=max_sentences_per_bundle,
             )
         elif rerender_context:
-            context = render_context(
+            context, compaction_stats = render_context_with_metadata(
                 row.get("evidence_bundles", []) or [],
                 rendering_profile=target_rendering,
                 max_chars=int(cfg.get("max_context_chars", 24000)),
                 token_budget=cfg.get("context_token_budget"),
+                compaction_profile="none",
+                max_sentences_per_bundle=max_sentences_per_bundle,
             )
         else:
             context = source_context
@@ -265,9 +317,12 @@ def replay_rows(
                 "source_rendering_profile": str(row.get("rendering_profile") or source_rendering),
                 "prompt_profile": target_prompt,
                 "rendering_profile": target_rendering,
-                "prompt_experiment_type": prompt_experiment_type(source_prompt, target_prompt, rendering_changed, context_truncation),
+                "prompt_experiment_type": prompt_experiment_type(source_prompt, target_prompt, rendering_changed, context_truncation, context_compaction),
                 "context_truncation_enabled": context_truncation,
-                "top_bundles": top_bundles,
+                "context_compaction_enabled": context_compaction,
+                "compaction_profile": compaction_profile,
+                "max_sentences_per_bundle": int(max_sentences_per_bundle or 3),
+                "top_bundles": effective_top_bundles,
                 "context_token_budget": context_token_budget,
                 "ordering_source": ordering_source,
                 "original_bundle_count": original_bundle_count,
@@ -310,6 +365,14 @@ def replay_rows(
         new_row["source_rendered_context_tokens"] = int(source_context_tokens or 0)
         new_row["source_input_prompt_tokens"] = int(source_input_value or 0)
         new_row["token_reduction_rate"] = 1.0 - float(new_row.get("input_prompt_tokens", 0.0) or 0.0) / max(1e-9, source_input_value) if source_input_value > 0 else 0.0
+        source_context_token_value = float(source_context_tokens or 0.0)
+        new_row["compaction_token_reduction_rate"] = 1.0 - float(new_row.get("rendered_context_tokens", 0.0) or 0.0) / max(1e-9, source_context_token_value) if source_context_token_value > 0 else 0.0
+        new_row["rendered_sentence_count"] = int(compaction_stats.get("rendered_sentence_count", 0) or 0)
+        new_row["avg_rendered_sentences_per_bundle"] = float(compaction_stats.get("avg_sentences_per_bundle", 0.0) or 0.0)
+        new_row["dropped_sentence_count"] = int(compaction_stats.get("dropped_sentence_count", 0) or 0)
+        new_row["duplicate_removed_count"] = int(compaction_stats.get("duplicate_removed_count", 0) or 0)
+        new_row["source_removed_count"] = int(compaction_stats.get("source_removed_count", 0) or 0)
+        new_row["metadata_removed_count"] = int(compaction_stats.get("metadata_removed_count", 0) or 0)
         out.append(new_row)
     return out
 
@@ -342,6 +405,8 @@ def main() -> None:
     parser.add_argument("--top-bundles", type=int, default=None)
     parser.add_argument("--context-token-budget", type=int, default=None)
     parser.add_argument("--ordering-source", choices=["current", "raw_score"], default="current")
+    parser.add_argument("--compaction-profile", choices=COMPACTION_PROFILES, default="none")
+    parser.add_argument("--max-sentences-per-bundle", type=int, default=3)
     parser.add_argument("--sample", type=int, default=None)
     parser.add_argument("--latest", action="store_true")
     parser.add_argument("--output-root", default="outputs/replay")
@@ -378,7 +443,9 @@ def main() -> None:
     target_rendering = str(args.rendering_profile or source_rendering or DEFAULT_RENDERING_PROFILE)
     cfg = load_generation_config(Path(args.config), args)
     cfg["rendering_profile"] = target_rendering
-    context_truncation = args.top_bundles is not None or args.context_token_budget is not None or args.ordering_source != "current"
+    effective_top_bundles = 3 if str(args.compaction_profile or "none") in {"top3_chain_dedup", "top3_chain_dedup_no_sources"} and args.top_bundles is None else args.top_bundles
+    context_truncation = effective_top_bundles is not None or args.context_token_budget is not None or args.ordering_source != "current"
+    context_compaction = str(args.compaction_profile or "none") != "none"
     replayed = replay_rows(
         rows,
         dataset,
@@ -393,9 +460,11 @@ def main() -> None:
         args.failure_category,
         args.no_llm,
         args.dry_run,
-        args.top_bundles,
+        effective_top_bundles,
         args.context_token_budget,
         args.ordering_source,
+        args.compaction_profile,
+        args.max_sentences_per_bundle,
     )
     expected_selected_count = len(rows)
     if args.failure_category:
@@ -412,12 +481,16 @@ def main() -> None:
     if args.failure_category:
         suffix = f"{suffix}_{args.failure_category}"
     if context_truncation:
-        if args.top_bundles is not None:
-            suffix = f"{suffix}_top{args.top_bundles}"
+        if effective_top_bundles is not None:
+            suffix = f"{suffix}_top{effective_top_bundles}"
         if args.context_token_budget is not None:
             suffix = f"{suffix}_ctx{args.context_token_budget}"
         if args.ordering_source != "current":
             suffix = f"{suffix}_{args.ordering_source}"
+    if context_compaction:
+        suffix = f"{suffix}_{args.compaction_profile}"
+        if args.compaction_profile in {"sentence_cap", "sentence_cap_no_sources"}:
+            suffix = f"{suffix}{args.max_sentences_per_bundle}"
     out_dir = Path(args.output_root) / timestamp / dataset / suffix
     out_dir.mkdir(parents=True, exist_ok=True)
     pred_out = out_dir / "predictions.jsonl"
@@ -432,14 +505,24 @@ def main() -> None:
             "rendering_profile": target_rendering,
             "target_rendering_profile": target_rendering,
             "failure_category": args.failure_category,
-            "prompt_experiment_type": prompt_experiment_type(source_prompt, target_prompt, bool(args.rendering_profile), context_truncation),
+            "prompt_experiment_type": prompt_experiment_type(source_prompt, target_prompt, bool(args.rendering_profile), context_truncation, context_compaction),
             "context_truncation_enabled": context_truncation,
-            "top_bundles": args.top_bundles,
+            "context_compaction_enabled": context_compaction,
+            "compaction_profile": str(args.compaction_profile or "none"),
+            "max_sentences_per_bundle": int(args.max_sentences_per_bundle or 3),
+            "top_bundles": effective_top_bundles,
             "context_token_budget": args.context_token_budget,
             "ordering_source": args.ordering_source,
             "avg_rendered_bundle_count": sum(float(x.get("rendered_bundle_count", 0.0) or 0.0) for x in replayed) / max(1, len(replayed)),
             "avg_dropped_bundle_count": sum(float(x.get("dropped_bundle_count", 0.0) or 0.0) for x in replayed) / max(1, len(replayed)),
             "token_reduction_rate": sum(float(x.get("token_reduction_rate", 0.0) or 0.0) for x in replayed) / max(1, len(replayed)),
+            "avg_rendered_sentence_count": sum(float(x.get("rendered_sentence_count", 0.0) or 0.0) for x in replayed) / max(1, len(replayed)),
+            "avg_sentences_per_bundle": sum(float(x.get("avg_rendered_sentences_per_bundle", 0.0) or 0.0) for x in replayed) / max(1, len(replayed)),
+            "avg_dropped_sentence_count": sum(float(x.get("dropped_sentence_count", 0.0) or 0.0) for x in replayed) / max(1, len(replayed)),
+            "avg_duplicate_removed_count": sum(float(x.get("duplicate_removed_count", 0.0) or 0.0) for x in replayed) / max(1, len(replayed)),
+            "avg_source_removed_count": sum(float(x.get("source_removed_count", 0.0) or 0.0) for x in replayed) / max(1, len(replayed)),
+            "avg_metadata_removed_count": sum(float(x.get("metadata_removed_count", 0.0) or 0.0) for x in replayed) / max(1, len(replayed)),
+            "avg_compaction_token_reduction_rate": sum(float(x.get("compaction_token_reduction_rate", 0.0) or 0.0) for x in replayed) / max(1, len(replayed)),
             "source_row_count": len(rows),
             "selected_row_count": len(replayed),
             "row_count_matches_selection": len(replayed) == expected_selected_count,
@@ -467,12 +550,22 @@ def main() -> None:
                 "failure_category": args.failure_category,
                 "prompt_experiment_type": result["prompt_experiment_type"],
                 "context_truncation_enabled": context_truncation,
-                "top_bundles": args.top_bundles,
+                "context_compaction_enabled": context_compaction,
+                "compaction_profile": str(args.compaction_profile or "none"),
+                "max_sentences_per_bundle": int(args.max_sentences_per_bundle or 3),
+                "top_bundles": effective_top_bundles,
                 "context_token_budget": args.context_token_budget,
                 "ordering_source": args.ordering_source,
                 "avg_rendered_bundle_count": result.get("avg_rendered_bundle_count"),
                 "avg_dropped_bundle_count": result.get("avg_dropped_bundle_count"),
                 "token_reduction_rate": result.get("token_reduction_rate"),
+                "avg_rendered_sentence_count": result.get("avg_rendered_sentence_count"),
+                "avg_sentences_per_bundle": result.get("avg_sentences_per_bundle"),
+                "avg_dropped_sentence_count": result.get("avg_dropped_sentence_count"),
+                "avg_duplicate_removed_count": result.get("avg_duplicate_removed_count"),
+                "avg_source_removed_count": result.get("avg_source_removed_count"),
+                "avg_metadata_removed_count": result.get("avg_metadata_removed_count"),
+                "avg_compaction_token_reduction_rate": result.get("avg_compaction_token_reduction_rate"),
                 "avg_prompt_template_tokens": result.get("avg_prompt_template_tokens"),
                 "avg_rendered_context_tokens": result.get("avg_rendered_context_tokens"),
                 "avg_input_prompt_tokens": result.get("avg_input_prompt_tokens"),
