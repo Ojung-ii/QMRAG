@@ -4,6 +4,13 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 from .text import safe_truncate, sentence_split, token_count
 
 DEFAULT_PROMPT_PROFILE = "common_qa"
+DEFAULT_RENDERING_PROFILE = "structured_chain"
+RENDERING_PROFILES = (
+    "structured_chain",
+    "plain_evidence",
+    "chain_only_compact",
+    "multi_anchor_table",
+)
 
 PROMPT_TEMPLATES = {
     "common_qa": """You are a QA assistant.
@@ -21,11 +28,9 @@ Answer:""",
     "qmrag_bundle_qa": """You are a QA assistant for evidence-bundle based retrieval.
 Answer the question using only the provided Context.
 
-The Context may contain multiple Evidence Bundles.
-Each bundle may describe an entity, a bridge entity, or a source sentence.
-Some questions require combining two bundles:
-- one bundle identifies the relevant entity;
-- another bundle states the property, date, location, author, occupation, or description of that entity.
+The Context may contain Evidence Chain, Multi-Anchor Evidence, and Supporting Evidence sections.
+For Evidence Chain, answer using the bridge/property sentence when it completes the question.
+For Multi-Anchor Evidence, compare the listed anchors using only the provided evidence.
 
 Use only information explicitly supported by the Context.
 Return only the final short answer span.
@@ -37,20 +42,401 @@ Question: {question}
 Context:
 {context}
 Answer:""",
+    "qmrag_bundle_light": """You are a QA assistant.
+Answer the question using only the provided Context.
+The Context may contain Evidence Chains and Multi-Anchor Evidence.
+For Evidence Chains, follow the Anchor → Bridge → answer evidence.
+For Multi-Anchor Evidence, compare only the listed anchors.
+Return only the final short answer.
+Do not output reasoning, explanations, citations, Markdown, or prefixes.
+For yes/no questions, output exactly yes or no in lowercase.
+If the answer cannot be found in the Context, output exactly: insufficient information
+
+Question: {question}
+Context:
+{context}
+Answer:""",
+    "qmrag_bundle_tiny": """You are a QA assistant.
+Use only the Context.
+If an Evidence Chain is given, follow Anchor → Bridge → answer evidence.
+If Multi-Anchor Evidence is given, compare the listed anchors.
+Return only the final short answer.
+If unavailable, output exactly: insufficient information
+
+Question: {question}
+Context:
+{context}
+Answer:""",
 }
 
-def build_context_text(bundles: Sequence[Mapping[str,Any]], max_chars: int=24000) -> str:
+INSUFFICIENT_PHRASES = (
+    "insufficient information",
+    "cannot be determined",
+    "not provided in the context",
+    "not found in the context",
+)
+
+IDK_PHRASES = (
+    "i don't know",
+    "i do not know",
+)
+
+_TOKENIZER_CACHE: dict[tuple[str, bool, bool], Any] = {}
+
+def count_tokens(text: str, tokenizer: Any = None) -> int:
+    if tokenizer is not None:
+        try:
+            return len(tokenizer.encode(str(text or ""), add_special_tokens=False))
+        except TypeError:
+            return len(tokenizer.encode(str(text or "")))
+        except Exception:
+            pass
+    return token_count(str(text or ""))
+
+def _token_counting_cfg(cfg: Mapping[str,Any] | None) -> Mapping[str,Any]:
+    tc=(cfg or {}).get("token_counting",{}) if cfg else {}
+    return tc if isinstance(tc,Mapping) else {}
+
+def _tokenizer_model_from_cfg(cfg: Mapping[str,Any] | None, model: Any = None) -> str | None:
+    tc=_token_counting_cfg(cfg)
+    requested=str(tc.get("tokenizer_model","auto") or "auto")
+    if requested.lower()!="auto":
+        return requested
+    for candidate in (model, (cfg or {}).get("model") if cfg else None):
+        value=str(candidate or "").strip()
+        if value and value.lower()!="auto":
+            return value
+    return None
+
+def _load_counting_tokenizer(cfg: Mapping[str,Any] | None, model: Any = None) -> tuple[Any | None, str]:
+    tc=_token_counting_cfg(cfg)
+    if tc and not bool(tc.get("enabled",True)):
+        return None,"approx"
+    tokenizer_model=_tokenizer_model_from_cfg(cfg,model)
+    if not tokenizer_model:
+        return None,"approx"
+    local_files_only=bool(tc.get("local_files_only",True))
+    trust_remote_code=bool(tc.get("trust_remote_code",True))
+    key=(tokenizer_model,local_files_only,trust_remote_code)
+    if key in _TOKENIZER_CACHE:
+        return _TOKENIZER_CACHE[key],"tokenizer"
+    try:
+        from transformers import AutoTokenizer
+        tokenizer=AutoTokenizer.from_pretrained(
+            tokenizer_model,
+            trust_remote_code=trust_remote_code,
+            local_files_only=local_files_only,
+        )
+        _TOKENIZER_CACHE[key]=tokenizer
+        return tokenizer,"tokenizer"
+    except Exception:
+        if tc and not bool(tc.get("fallback_to_estimate",True)):
+            raise
+        return None,"approx"
+
+def prompt_template_token_count(prompt_profile: str, tokenizer: Any = None) -> int:
+    profile=str(prompt_profile or DEFAULT_PROMPT_PROFILE)
+    if profile not in PROMPT_TEMPLATES:
+        profile=DEFAULT_PROMPT_PROFILE
+    return count_tokens(PROMPT_TEMPLATES[profile].format(question="", context=""), tokenizer)
+
+def extract_usage_token_counts(usage: Any) -> dict[str,int | None]:
+    if usage is None:
+        usage_dict={}
+    elif isinstance(usage,Mapping):
+        usage_dict=dict(usage)
+    elif hasattr(usage,"model_dump"):
+        usage_dict=usage.model_dump()
+    else:
+        usage_dict={k:getattr(usage,k) for k in ("prompt_tokens","completion_tokens","total_tokens") if hasattr(usage,k)}
+    def get_int(*keys: str) -> int | None:
+        for key in keys:
+            value=usage_dict.get(key)
+            if value is not None:
+                try:
+                    return int(value)
+                except Exception:
+                    return None
+        return None
+    return {
+        "prompt_tokens":get_int("prompt_tokens","input_tokens"),
+        "completion_tokens":get_int("completion_tokens","output_tokens"),
+        "total_tokens":get_int("total_tokens"),
+    }
+
+def llm_input_text(prompt: str, cfg: Mapping[str,Any] | None = None) -> str:
+    system_message=(cfg or {}).get("system_message") if cfg else None
+    if system_message is None and cfg:
+        system_message=cfg.get("system_prompt")
+    if system_message:
+        return f"{system_message}\n{prompt}"
+    return str(prompt or "")
+
+def add_token_accounting_fields(
+    row: Dict[str,Any],
+    prompt: str,
+    rendered_context: str,
+    raw_prediction: Any,
+    prompt_profile: str,
+    cfg: Mapping[str,Any] | None = None,
+    usage: Any = None,
+    model: Any = None,
+) -> Dict[str,Any]:
+    usage_counts=extract_usage_token_counts(usage)
+    tokenizer,counter_source=_load_counting_tokenizer(cfg,model)
+    usage_prompt=usage_counts.get("prompt_tokens")
+    usage_completion=usage_counts.get("completion_tokens")
+    usage_total=usage_counts.get("total_tokens")
+    input_prompt_tokens=usage_prompt if usage_prompt is not None else count_tokens(llm_input_text(prompt,cfg),tokenizer)
+    completion_tokens=usage_completion if usage_completion is not None else count_tokens(str(raw_prediction or ""),tokenizer)
+    total_llm_tokens=usage_total if usage_total is not None else int(input_prompt_tokens)+int(completion_tokens)
+    row.update({
+        "prompt_template_tokens":prompt_template_token_count(prompt_profile,tokenizer),
+        "rendered_context_tokens":count_tokens(rendered_context,tokenizer),
+        "input_prompt_tokens":int(input_prompt_tokens),
+        "completion_tokens":int(completion_tokens),
+        "total_llm_tokens":int(total_llm_tokens),
+        "token_count_source":"usage" if usage_prompt is not None or usage_completion is not None or usage_total is not None else counter_source,
+        "llm_usage_prompt_tokens":usage_prompt,
+        "llm_usage_completion_tokens":usage_completion,
+        "llm_usage_total_tokens":usage_total,
+    })
+    return row
+
+def _ordered_bundles(bundles: Sequence[Mapping[str,Any]]) -> list[Mapping[str,Any]]:
+    order_rank={"anchor_connected_chain_complete":0,"multi_anchor":1,"anchor":2,"chain_complete_v2":3,"bridge_connected":4,"same_title":5,"generic_relation":6,"fallback":7,"complete_bridge_chain":3,"exact_query_anchor":2,"bridge_candidate":4}
+    return [
+        item[1]
+        for item in sorted(
+        list(enumerate(bundles)),
+        key=lambda item:(
+            order_rank.get(str(item[1].get("ordering_group","same_title")),8),
+            not bool(item[1].get("chain_complete_v2",item[1].get("chain_complete"))),
+            not bool(item[1].get("anchor_connected")),
+            bool(item[1].get("is_generic_relation_title")),
+            not bool(item[1].get("exact_anchor_match")),
+            -float(item[1].get("residual_coverage_count",0.0) or 0.0),
+            -float(item[1].get("score",0.0) or 0.0),
+            item[0],
+        ),
+    )
+    ]
+
+def _bridge_paths(bundle: Mapping[str,Any]) -> list[Mapping[str,Any]]:
+    return [x for x in bundle.get("evidence_path",[]) or [] if isinstance(x,Mapping) and x.get("path_type")=="mention_bridge"]
+
+def _append_unique_sentence(lines: list[str], seen: set[str], title: str, text: Any, prefix: str="- ") -> None:
+    sentence=str(text or "").strip()
+    if not sentence:
+        return
+    key=" ".join(sentence.split())
+    if key in seen:
+        return
+    seen.add(key)
+    clean_title=str(title or "").strip()
+    if clean_title:
+        lines.append(f"{prefix}{clean_title}: {sentence}")
+    else:
+        lines.append(f"{prefix}{sentence}")
+
+def _source_title_for_bundle(bundle: Mapping[str,Any]) -> str:
+    return str(bundle.get("anchor_title") or bundle.get("title") or "").strip()
+
+def _render_structured_chain(bundles: Sequence[Mapping[str,Any]], max_chars: int) -> str:
     parts=[]
-    for b in bundles:
-        parts.append(f"[Bundle {b.get('bundle_id')} | anchor={b.get('anchor_title')} | score={b.get('score')}]")
+    ordered=_ordered_bundles(bundles)
+    for i,b in enumerate(ordered, start=1):
+        bridge=", ".join(str(x) for x in b.get("bridge_titles",[]) or [])
+        bundle_type=str(b.get("bundle_type") or "")
+        bridge_paths=_bridge_paths(b)
+        chain_texts=set()
+        if bundle_type=="multi_anchor":
+            anchors="; ".join(str(x) for x in b.get("anchor_titles",[]) or [])
+            parts.append(f"[Multi-Anchor Evidence {i} | anchors={anchors} | complete={bool(b.get('multi_anchor_complete'))}]")
+            seen=set()
+            for p in b.get("propositions",[]) or []:
+                title=str(p.get("title") or "")
+                text=str(p.get("text") or "")
+                key=(title,text)
+                if title and text and key not in seen:
+                    seen.add(key)
+                    parts.append(f"- {title}: {text}")
+            if not seen:
+                for c in b.get("source_chunks",[]) or []:
+                    title=str(c.get("title") or "")
+                    text=str(c.get("text") or "")
+                    if title and text:
+                        parts.append(f"- {title}: {text}")
+            parts.append("")
+            continue
+        if bridge_paths:
+            parts.append(f"[Evidence Chain {i} | anchor_connected={bool(b.get('anchor_connected'))} | chain_complete_v2={bool(b.get('chain_complete_v2',b.get('chain_complete')))} | score={b.get('score')}]")
+            parts.append(f"Anchor: {b.get('anchor_title')}")
+            if bridge:
+                parts.append(f"Bridge: {bridge}")
+            parts.append("Chain:")
+            for path in bridge_paths[:4]:
+                for title_key,text_key in (("source_title","seed_prop"),("bridge_title","bridge_prop")):
+                    text=str(path.get(text_key) or "")
+                    if text and not any(text==seen or text in seen for seen in chain_texts):
+                        chain_texts.add(text)
+                        parts.append(f"- {path.get(title_key)}: {text}")
+        else:
+            parts.append(f"[Supporting Evidence {i} | anchor={b.get('anchor_title')} | relation_title={bool(b.get('is_relation_title_bundle'))} | score={b.get('score')}]")
+            if b.get("anchor_title"):
+                parts.append(f"Anchor: {b.get('anchor_title')}")
         if b.get("propositions"):
-            parts.append("Propositions:")
-            for p in b.get("propositions",[]): parts.append(f"- ({p.get('prop_id')} | {p.get('title')}) {p.get('text')}")
+            prop_lines=[]
+            for p in b.get("propositions",[]):
+                text=str(p.get("text") or "")
+                if text and any(text==seen or text in seen for seen in chain_texts):
+                    continue
+                prop_lines.append(f"- ({p.get('prop_id')} | {p.get('title')}) {text}")
+            if prop_lines:
+                parts.append("Supporting Propositions:")
+                parts.extend(prop_lines)
         if b.get("source_chunks"):
             parts.append("Sources:")
             for c in b.get("source_chunks",[]): parts.append(f"- [{c.get('title')} | {c.get('chunk_id')}] {c.get('text')}")
         parts.append("")
     return safe_truncate("\n".join(parts).strip(), max_chars)
+
+def _render_plain_evidence(bundles: Sequence[Mapping[str,Any]], max_chars: int) -> str:
+    parts=[]
+    seen_global=set()
+    for b in _ordered_bundles(bundles):
+        title=_source_title_for_bundle(b)
+        lines=[]
+        seen=set()
+        for path in _bridge_paths(b):
+            _append_unique_sentence(lines, seen, str(path.get("source_title") or title), path.get("seed_prop"), prefix="")
+            _append_unique_sentence(lines, seen, str(path.get("bridge_title") or ""), path.get("bridge_prop"), prefix="")
+        for p in b.get("propositions",[]) or []:
+            _append_unique_sentence(lines, seen, str(p.get("title") or title), p.get("text"), prefix="")
+        if not lines:
+            for c in b.get("source_chunks",[]) or []:
+                for sent in sentence_split(str(c.get("text","")))[:2]:
+                    _append_unique_sentence(lines, seen, str(c.get("title") or title), sent, prefix="")
+        kept=[]
+        for line in lines:
+            key=" ".join(line.split())
+            if key and key not in seen_global:
+                seen_global.add(key); kept.append(line)
+        if not kept:
+            continue
+        if title:
+            parts.append(f"Title: {title}")
+        for line in kept:
+            if ": " in line:
+                maybe_title, sent=line.split(": ",1)
+                if maybe_title==title:
+                    parts.append(sent)
+                else:
+                    parts.append(f"{maybe_title}: {sent}")
+            else:
+                parts.append(line)
+        parts.append("")
+    return safe_truncate("\n".join(parts).strip(), max_chars)
+
+def _is_complete_chain_bundle(bundle: Mapping[str,Any]) -> bool:
+    return bool(bundle.get("anchor_connected_chain_complete") or bundle.get("chain_complete_v2") or bundle.get("chain_complete"))
+
+def _render_chain_only_compact(bundles: Sequence[Mapping[str,Any]], max_chars: int) -> str:
+    ordered=_ordered_bundles(bundles)
+    chain_bundles=[b for b in ordered if _bridge_paths(b) and _is_complete_chain_bundle(b)]
+    other_chain_bundles=[b for b in ordered if _bridge_paths(b) and b not in chain_bundles]
+    fallback=[b for b in ordered if not _bridge_paths(b)]
+    parts=[]
+    seen=set()
+    def append_bundle(bundle: Mapping[str,Any], label: str) -> None:
+        title=_source_title_for_bundle(bundle)
+        bridge=", ".join(str(x) for x in bundle.get("bridge_titles",[]) or [])
+        if label=="chain":
+            header=f"Evidence Chain: {title}"
+            if bridge:
+                header+=f" -> {bridge}"
+            parts.append(header)
+            for path in _bridge_paths(bundle):
+                _append_unique_sentence(parts, seen, str(path.get("source_title") or title), path.get("seed_prop"))
+                _append_unique_sentence(parts, seen, str(path.get("bridge_title") or ""), path.get("bridge_prop"))
+        else:
+            if title:
+                parts.append(f"Supporting Evidence: {title}")
+            for p in bundle.get("propositions",[]) or []:
+                _append_unique_sentence(parts, seen, str(p.get("title") or title), p.get("text"))
+        parts.append("")
+    for bundle in chain_bundles:
+        append_bundle(bundle,"chain")
+    for bundle in other_chain_bundles:
+        if len("\n".join(parts)) >= max_chars:
+            break
+        append_bundle(bundle,"chain")
+    for bundle in fallback:
+        if len("\n".join(parts)) >= max_chars:
+            break
+        append_bundle(bundle,"support")
+    return safe_truncate("\n".join(parts).strip(), max_chars)
+
+def _render_multi_anchor_table(bundles: Sequence[Mapping[str,Any]], max_chars: int) -> str:
+    ordered=_ordered_bundles(bundles)
+    parts=[]
+    seen=set()
+    for b in ordered:
+        if b.get("bundle_type")!="multi_anchor":
+            continue
+        parts.append("Multi-Anchor Evidence:")
+        for p in b.get("propositions",[]) or []:
+            _append_unique_sentence(parts, seen, str(p.get("title") or ""), p.get("text"))
+        if not b.get("propositions"):
+            for c in b.get("source_chunks",[]) or []:
+                for sent in sentence_split(str(c.get("text","")))[:2]:
+                    _append_unique_sentence(parts, seen, str(c.get("title") or ""), sent)
+        parts.append("")
+    for b in ordered:
+        if b.get("bundle_type")=="multi_anchor":
+            continue
+        if _bridge_paths(b):
+            title=_source_title_for_bundle(b)
+            bridge=", ".join(str(x) for x in b.get("bridge_titles",[]) or [])
+            parts.append(f"Evidence Chain: {title}" + (f" -> {bridge}" if bridge else ""))
+            for path in _bridge_paths(b):
+                _append_unique_sentence(parts, seen, str(path.get("source_title") or title), path.get("seed_prop"))
+                _append_unique_sentence(parts, seen, str(path.get("bridge_title") or ""), path.get("bridge_prop"))
+            parts.append("")
+        elif len("\n".join(parts)) < max_chars:
+            title=_source_title_for_bundle(b)
+            if title:
+                parts.append(f"Supporting Evidence: {title}")
+            for p in b.get("propositions",[]) or []:
+                _append_unique_sentence(parts, seen, str(p.get("title") or title), p.get("text"))
+            parts.append("")
+    return safe_truncate("\n".join(parts).strip(), max_chars)
+
+def render_context(
+    evidence_bundles: Sequence[Mapping[str,Any]],
+    rendering_profile: str = DEFAULT_RENDERING_PROFILE,
+    max_chars: int = 24000,
+    token_budget: int | None = None,
+    **_: Any,
+) -> str:
+    profile=str(rendering_profile or DEFAULT_RENDERING_PROFILE)
+    if profile not in RENDERING_PROFILES:
+        raise ValueError(f"Unsupported rendering_profile={profile!r}; choices={list(RENDERING_PROFILES)}")
+    char_budget=int(max_chars or 24000)
+    if token_budget:
+        char_budget=min(char_budget, int(token_budget)*6)
+    if profile=="structured_chain":
+        return _render_structured_chain(evidence_bundles,char_budget)
+    if profile=="plain_evidence":
+        return _render_plain_evidence(evidence_bundles,char_budget)
+    if profile=="chain_only_compact":
+        return _render_chain_only_compact(evidence_bundles,char_budget)
+    if profile=="multi_anchor_table":
+        return _render_multi_anchor_table(evidence_bundles,char_budget)
+    raise AssertionError(profile)
+
+def build_context_text(bundles: Sequence[Mapping[str,Any]], max_chars: int=24000, rendering_profile: str=DEFAULT_RENDERING_PROFILE) -> str:
+    return render_context(bundles, rendering_profile=rendering_profile, max_chars=max_chars)
 
 def build_prompt(question: str, context: str, prompt_profile: str = DEFAULT_PROMPT_PROFILE) -> str:
     profile = str(prompt_profile or DEFAULT_PROMPT_PROFILE)
@@ -58,11 +444,25 @@ def build_prompt(question: str, context: str, prompt_profile: str = DEFAULT_PROM
         raise ValueError(f"Unsupported prompt_profile={profile!r}; choices={sorted(PROMPT_TEMPLATES)}")
     return PROMPT_TEMPLATES[profile].format(question=question, context=context)
 
-def build_generation_prompt(question: str, bundles: Sequence[Mapping[str,Any]], cfg: Optional[Mapping[str,Any]]=None) -> tuple[str, str]:
+def is_insufficient_prediction(prediction: Any) -> bool:
+    text=str(prediction or "").lower()
+    return any(phrase in text for phrase in INSUFFICIENT_PHRASES)
+
+def has_idk_phrase(prediction: Any) -> bool:
+    text=str(prediction or "").lower()
+    return any(phrase in text for phrase in IDK_PHRASES)
+
+def normalize_prediction_for_eval(prediction: Any) -> str:
+    if prediction is None:
+        return ""
+    return str(prediction).strip()
+
+def build_generation_prompt(question: str, bundles: Sequence[Mapping[str,Any]], cfg: Optional[Mapping[str,Any]]=None) -> tuple[str, str, str]:
     cfg=cfg or {}
     prompt_profile=str(cfg.get("prompt_profile") or DEFAULT_PROMPT_PROFILE)
-    context=build_context_text(bundles, int(cfg.get("max_context_chars",24000)))
-    return build_prompt(question, context, prompt_profile), prompt_profile
+    rendering_profile=str(cfg.get("rendering_profile") or DEFAULT_RENDERING_PROFILE)
+    context=render_context(bundles, rendering_profile, int(cfg.get("max_context_chars",24000)), cfg.get("context_token_budget"))
+    return build_prompt(question, context, prompt_profile), prompt_profile, context
 
 def extractive_fallback_answer(question: str, bundles: Sequence[Mapping[str,Any]]) -> str:
     cands=[]
@@ -102,18 +502,29 @@ def _generate_vllm(prompt: str, cfg: Mapping[str,Any]) -> Dict[str,Any]:
     if cfg.get("stop"): req["stop"]=cfg.get("stop")
     if cfg.get("extra_body"): req["extra_body"]=dict(cfg.get("extra_body") or {})
     resp=client.chat.completions.create(**req); pred=resp.choices[0].message.content or ""; usage=getattr(resp,"usage",None)
-    return {"prediction":pred.strip(),"llm_provider":"vllm","model":model,"base_url":base_url,"usage":usage.model_dump() if hasattr(usage,"model_dump") else {}}
+    return {"raw_prediction":pred,"prediction":normalize_prediction_for_eval(pred),"llm_provider":"vllm","generation_provider":"vllm","model":model,"base_url":base_url,"usage":usage.model_dump() if hasattr(usage,"model_dump") else {}}
 
 def generate_answer(question: str, bundles: Sequence[Mapping[str,Any]], cfg: Mapping[str,Any]) -> Dict[str,Any]:
-    provider=str(cfg.get("provider","none")).lower(); prompt,prompt_profile=build_generation_prompt(question,bundles,cfg)
-    if provider in {"none","extractive","fallback","no-llm"}: return {"prediction":extractive_fallback_answer(question,bundles),"prompt":prompt,"prompt_profile":prompt_profile,"llm_provider":"extractive_fallback"}
+    provider=str(cfg.get("provider","none")).lower()
+    render_t0=time.perf_counter()
+    prompt,prompt_profile,rendered_context=build_generation_prompt(question,bundles,cfg)
+    context_rendering_s=round(time.perf_counter()-render_t0,6)
+    rendering_profile=str(cfg.get("rendering_profile") or DEFAULT_RENDERING_PROFILE)
+    t0=time.perf_counter()
+    if provider in {"none","extractive","fallback","no-llm"}:
+        raw_prediction=extractive_fallback_answer(question,bundles)
+        generation_s=round(time.perf_counter()-t0,6)
+        return {"raw_prediction":raw_prediction,"prediction":normalize_prediction_for_eval(raw_prediction),"rendered_context":rendered_context,"prompt":prompt,"prompt_profile":prompt_profile,"rendering_profile":rendering_profile,"generation_latency_s":generation_s,"generation_stage_timings_s":{"context_rendering":context_rendering_s,"generation":generation_s},"llm_provider":"extractive_fallback","generation_provider":"extractive_fallback"}
     if provider=="vllm":
         last=None
         for attempt in range(int(cfg.get("retries",1))+1):
             try:
-                out=_generate_vllm(prompt,cfg); out["prompt"]=prompt if cfg.get("save_prompt",False) else None; out["prompt_profile"]=prompt_profile; return out
+                out=_generate_vllm(prompt,cfg)
+                generation_s=round(time.perf_counter()-t0,6)
+                out["prompt"]=prompt; out["rendered_context"]=rendered_context; out["prompt_profile"]=prompt_profile; out["rendering_profile"]=rendering_profile; out["generation_latency_s"]=generation_s; out["generation_stage_timings_s"]={"context_rendering":context_rendering_s,"generation":generation_s}; return out
             except Exception as e:
                 last=e
                 if attempt<int(cfg.get("retries",1)): time.sleep(float(cfg.get("retry_sleep_s",2.0)))
-        raise RuntimeError(f"vLLM generation failed: {last!r}")
+        generation_s=round(time.perf_counter()-t0,6)
+        return {"raw_prediction":"","prediction":"","rendered_context":rendered_context,"prompt":prompt,"prompt_profile":prompt_profile,"rendering_profile":rendering_profile,"generation_latency_s":generation_s,"generation_stage_timings_s":{"context_rendering":context_rendering_s,"generation":generation_s},"llm_provider":"vllm","generation_provider":"vllm","generation_error":repr(last)}
     raise ValueError(f"Unsupported generation.provider={provider}")

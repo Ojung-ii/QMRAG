@@ -1,0 +1,20 @@
+extends: qmrag_v2_common_top3.yaml
+
+generation:
+  prompt_profile: qmrag_bundle_qa
+  rendering_profile: structured_chain
+  token_counting:
+    enabled: true
+    tokenizer_model: auto
+    fallback_to_estimate: true
+
+sota_config:
+  role: compact_efficiency_bundle_top3
+  prompt_experiment_type: compact_ablation
+  context: top_bundles
+  top_bundles: 3
+  context_token_budget: null
+  notes:
+    - Same compact top-3 context as common_top3, with the QMRAG-bundle prompt.
+    - Implement with replay_generation.py --top-bundles 3 to avoid rerunning retrieval.
+    - This is not the main default.

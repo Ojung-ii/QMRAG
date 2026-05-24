@@ -1,0 +1,82 @@
+{
+  "name": "qmrag_v2_mainline",
+  "purpose": "SOTA/reproducibility config pack for QMRAG v2",
+  "created_at": "2026-05-24T22:18:08+0900",
+  "base_commit": "75cb7a42dd7406ec76462459fe40d745156fe739",
+  "mainline_setting": {
+    "retrieval_variant": "full_hetero",
+    "seed_selection_variant": "top_relevance",
+    "candidate_pool_size": "default/full",
+    "rendering_profile": "structured_chain",
+    "prompt_profile": "common_qa",
+    "context": "full",
+    "top_bundles": null,
+    "context_token_budget": null,
+    "bridge_enabled": true,
+    "bridge_selection": "residual_lexical",
+    "ordering": "anchor_chain_aware",
+    "anchor_constrained": true,
+    "multi_anchor_bundle": true,
+    "demote_generic_relation_titles": true,
+    "prediction_postprocessing": "unchanged"
+  },
+  "ablation_settings": {
+    "bundle_prompt": "qmrag_bundle_qa",
+    "compact_top_bundles": 3,
+    "runtime_candidate_pool_size": 60
+  },
+  "datasets": [
+    "hotpotqa",
+    "2wiki",
+    "popqa",
+    "musique"
+  ],
+  "models": {
+    "llm_endpoint": "http://localhost:8011/v1",
+    "embedding_model_path": "/home/dilab/.cache/huggingface/models--nvidia--NV-Embed-v2/snapshots/3fa59658547db50a1e8e3346cf057fd0c77ed6ef/"
+  },
+  "config_hashes_sha256": {
+    "qmrag_v2_common_full.yaml": "6cafc007f55c65557df61ca96e9218df9b28da6ffc16b63c1d73b00c6675fad5",
+    "qmrag_v2_bundle_full.yaml": "806794ee23796260e0fb92f0d295010131be4fad21a7ed72d1e50ced112c9ba1",
+    "qmrag_v2_common_top3.yaml": "21bcbf2148e21225ed51fba6aee2559db5b405dd99fa50b8129988f94e8f0516",
+    "qmrag_v2_bundle_top3.yaml": "821003889720ad94aaef3a689df8d2eb269e32328b134ef20d113c2dc5eabc36",
+    "qmrag_v2_runtime_cap60.yaml": "662f86225f14e9b50c244557bb86234b7869b678307b570a657fcb1d9c6fd5af"
+  },
+  "reported_result_sources": {
+    "common_full": {
+      "hotpotqa": "outputs/hotpotqa/eval/20260524_204859_hotpotqa_seed_top_relevance_n1000/predictions.jsonl",
+      "2wiki": "outputs/2wiki/eval/20260524_213408_2wiki_seed_top_relevance_n1000/predictions.jsonl",
+      "popqa": "outputs/popqa/eval/20260524_022010/predictions.jsonl",
+      "musique": "outputs/musique/eval/20260524_022855/predictions.jsonl"
+    },
+    "bundle_full": {
+      "hotpotqa": "outputs/replay/20260524_123553/hotpotqa/common_qa_to_qmrag_bundle_qa/predictions.jsonl",
+      "2wiki": "outputs/replay/20260524_125139/2wiki/common_qa_to_qmrag_bundle_qa/predictions.jsonl",
+      "popqa": "outputs/replay/20260524_130714/popqa/common_qa_to_qmrag_bundle_qa/predictions.jsonl",
+      "musique": "outputs/replay/20260524_132524/musique/common_qa_to_qmrag_bundle_qa/predictions.jsonl"
+    },
+    "seed_top_relevance_n1000": {
+      "hotpotqa": "outputs/hotpotqa/eval/20260524_204859_hotpotqa_seed_top_relevance_n1000/predictions.jsonl",
+      "2wiki": "outputs/2wiki/eval/20260524_213408_2wiki_seed_top_relevance_n1000/predictions.jsonl"
+    },
+    "retrieval_metrics_analysis": {
+      "latest_generated_at": "outputs/analysis/20260524_221653"
+    },
+    "prompt_compare_analysis": {
+      "latest_generated_at": "outputs/analysis/20260524_221712"
+    }
+  },
+  "reported_source_caveats": {
+    "hotpotqa": "common_full has a matching top_relevance n=1000 source.",
+    "2wiki": "common_full has a matching top_relevance n=1000 source.",
+    "popqa": "reported n=1000 source is the existing full-context common run from the overnight pack; rerun qmrag_v2_common_full.yaml for a fresh top_relevance PopQA reproduction.",
+    "musique": "reported n=1000 source is the existing full-context common run from the overnight pack; rerun qmrag_v2_common_full.yaml for a fresh top_relevance MuSiQue reproduction."
+  },
+  "notes": [
+    "EffiRAG is excluded from baseline comparison because it is prior work by the same author.",
+    "QMRAG-bundle is prompt ablation, not main fair-comparison result.",
+    "candidate_pool_size=60 is runtime ablation, not main default.",
+    "top_bundles=3 is unified compact ablation, not main default.",
+    "No dataset-specific settings are used in mainline configs."
+  ]
+}
