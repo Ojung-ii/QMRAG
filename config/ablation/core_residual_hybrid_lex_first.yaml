@@ -1,0 +1,22 @@
+extends: ../default.yaml
+
+run:
+  ablation_variant: core_residual_hybrid_lex_first
+  enable_timing: true
+
+generation:
+  prompt_profile: common_qa
+  rendering_profile: structured_chain
+
+retrieval:
+  retrieval_variant: full_hetero
+  seed_selection_variant: top_relevance
+  residual_selection: residual_hybrid_lex_first
+  candidate_cap:
+    enabled: false
+  bridge:
+    enabled: true
+    selection: residual_hybrid_lex_first
+    ordering: anchor_chain_aware
+    multi_anchor_bundle: true
+

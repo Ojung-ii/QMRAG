@@ -26,6 +26,7 @@ def parse_args():
     p.add_argument("--retrieval-variant", choices=["full_hetero","prop_text_only","prop_parent_anchor","prop_parent_mention_bidirectional"], default=None)
     p.add_argument("--seed-selection-variant", choices=["medoid_current","top_relevance","anchor_first","chain_potential"], default=None)
     p.add_argument("--residual-selection", choices=["residual_lexical","bridge_fullquery","residual_dense_only","residual_hybrid_lex_first","residual_dense_fallback","residual_unified_alignment"], default=None)
+    p.add_argument("--ablation-variant", default=None)
     p.add_argument("--candidate-pool-size", type=int, default=None, help="Enable candidate cap ablation with this total candidate count.")
     p.add_argument("--stable-dedup-before-seed", action="store_true", help="Enable stable candidate dedup before seed selection as an ablation flag.")
     p.add_argument("--enable-timing", action="store_true")
@@ -60,6 +61,8 @@ def apply_overrides(cfg: Dict[str,Any], args) -> Dict[str,Any]:
     if args.residual_selection:
         cfg.setdefault("retrieval",{}).setdefault("bridge",{})["selection"]=args.residual_selection
         cfg.setdefault("retrieval",{})["residual_selection"]=args.residual_selection
+    if args.ablation_variant:
+        cfg.setdefault("run",{})["ablation_variant"]=args.ablation_variant
     if args.candidate_pool_size is not None:
         cap_cfg=cfg.setdefault("retrieval",{}).setdefault("candidate_cap",{})
         cap_cfg["enabled"]=True
@@ -331,6 +334,7 @@ def run_dataset(dataset: str, cfg: Dict[str,Any], args, timestamp: str):
     dump_yaml(cfg,out_dir/"config.yaml")
     prompt_profile=str(cfg.get("generation",{}).get("prompt_profile") or DEFAULT_PROMPT_PROFILE)
     rendering_profile=str(cfg.get("generation",{}).get("rendering_profile") or DEFAULT_RENDERING_PROFILE)
+    ablation_variant=str(cfg.get("run",{}).get("ablation_variant") or "")
     if args.mode=="eval": return eval_only(dataset,out_dir,logger,prompt_profile,compat_dir)
     ds_cfg=cfg.get("datasets",{}).get(dataset)
     if not ds_cfg: raise ValueError(f"Dataset {dataset} not in config")
@@ -386,14 +390,15 @@ def run_dataset(dataset: str, cfg: Dict[str,Any], args, timestamp: str):
                     row_rendering_profile=str(gen.get("rendering_profile",rendering_profile) or DEFAULT_RENDERING_PROFILE)
                     retrieval_variant=str(cfg.get("retrieval",{}).get("retrieval_variant","full_hetero"))
                     seed_selection_variant=str(cfg.get("retrieval",{}).get("seed_selection_variant","medoid_current"))
-                    row={"dataset":dataset,"id":qa.id,"question":qa.question,"raw_prediction":raw_prediction,"prediction":prediction,"answers":qa.answers,"support_titles":qa.support_titles,"support_facts":qa.support_facts,"prompt_profile":row_prompt_profile,"rendering_profile":row_rendering_profile,"prompt_experiment_type":prompt_experiment_type(row_prompt_profile,row_rendering_profile),"retrieval_variant":retrieval_variant,"seed_selection_variant":seed_selection_variant,"generation_provider":generation_provider,"evidence_bundles":ret["evidence_bundles"],"seeds":ret["seeds"],"retrieval_diagnostics":ret["diagnostics"],"generation_latency_s":float(gen.get("generation_latency_s",round(time.perf_counter()-t,6)) or 0.0),"llm_provider":generation_provider,"llm_model":gen.get("model"),"llm_usage":gen.get("usage")}
+                    ret["diagnostics"]["ablation_variant"]=ablation_variant
+                    row={"dataset":dataset,"id":qa.id,"question":qa.question,"raw_prediction":raw_prediction,"prediction":prediction,"answers":qa.answers,"support_titles":qa.support_titles,"support_facts":qa.support_facts,"prompt_profile":row_prompt_profile,"rendering_profile":row_rendering_profile,"prompt_experiment_type":prompt_experiment_type(row_prompt_profile,row_rendering_profile),"retrieval_variant":retrieval_variant,"seed_selection_variant":seed_selection_variant,"ablation_variant":ablation_variant,"generation_provider":generation_provider,"evidence_bundles":ret["evidence_bundles"],"seeds":ret["seeds"],"retrieval_diagnostics":ret["diagnostics"],"generation_latency_s":float(gen.get("generation_latency_s",round(time.perf_counter()-t,6)) or 0.0),"llm_provider":generation_provider,"llm_model":gen.get("model"),"llm_usage":gen.get("usage")}
                     if gen.get("generation_error"): row["generation_error"]=gen.get("generation_error")
                     row=add_generation_logging_fields(row,gen,cfg)
                 except Exception as e:
                     logger.event({"event":"example.error","dataset":dataset,"qid":qa.id,"error":repr(e)})
                     if not args.continue_on_error: raise
                     generation_provider=cfg.get("generation",{}).get("provider")
-                    row={"dataset":dataset,"id":qa.id,"question":qa.question,"raw_prediction":"","prediction":"","answers":qa.answers,"support_titles":qa.support_titles,"prompt_profile":prompt_profile,"rendering_profile":rendering_profile,"prompt_experiment_type":prompt_experiment_type(prompt_profile,rendering_profile),"retrieval_variant":str(cfg.get("retrieval",{}).get("retrieval_variant","full_hetero")),"seed_selection_variant":str(cfg.get("retrieval",{}).get("seed_selection_variant","medoid_current")),"generation_provider":generation_provider,"error":repr(e),"evidence_bundles":[],"seeds":[],"retrieval_diagnostics":{"candidate_count":0,"seed_count":0,"bundle_count":0,"context_tokens":0,"timings":{}},"generation_latency_s":0.0,"llm_provider":generation_provider}
+                    row={"dataset":dataset,"id":qa.id,"question":qa.question,"raw_prediction":"","prediction":"","answers":qa.answers,"support_titles":qa.support_titles,"prompt_profile":prompt_profile,"rendering_profile":rendering_profile,"prompt_experiment_type":prompt_experiment_type(prompt_profile,rendering_profile),"retrieval_variant":str(cfg.get("retrieval",{}).get("retrieval_variant","full_hetero")),"seed_selection_variant":str(cfg.get("retrieval",{}).get("seed_selection_variant","medoid_current")),"ablation_variant":ablation_variant,"generation_provider":generation_provider,"error":repr(e),"evidence_bundles":[],"seeds":[],"retrieval_diagnostics":{"ablation_variant":ablation_variant,"candidate_count":0,"seed_count":0,"bundle_count":0,"context_tokens":0,"timings":{}},"generation_latency_s":0.0,"llm_provider":generation_provider}
                     row=add_generation_logging_fields(row,{"rendered_context":"","prompt":""},cfg)
                 preds.append(row)
                 with timing.time_block(dataset=dataset, query_id=qa.id, stage="write_outputs", num_items_in=1) as twrite:
@@ -405,6 +410,7 @@ def run_dataset(dataset: str, cfg: Dict[str,Any], args, timestamp: str):
             res=evaluate_predictions(preds,dataset=dataset,prompt_profile=prompt_profile); res["index_dir"]=str(index_dir); res["index_source"]=index_info.get("index_source"); res["bridge_config"]=dict(cfg.get("retrieval",{}).get("bridge",{}) or {})
             res["retrieval_variant"]=str(cfg.get("retrieval",{}).get("retrieval_variant","full_hetero"))
             res["seed_selection_variant"]=str(cfg.get("retrieval",{}).get("seed_selection_variant","medoid_current"))
+            res["ablation_variant"]=ablation_variant
             if index_info.get("source_index_dir"): res["source_index_dir"]=index_info.get("source_index_dir")
             dump_json(res,out_dir/"eval.json"); (out_dir/"eval_summary.md").write_text(summary_markdown(dataset,res),encoding="utf-8")
     timing_summary=timing.write_summary()

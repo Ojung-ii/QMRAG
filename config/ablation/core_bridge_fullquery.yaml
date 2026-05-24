@@ -1,0 +1,22 @@
+extends: ../default.yaml
+
+run:
+  ablation_variant: core_bridge_fullquery
+  enable_timing: true
+
+generation:
+  prompt_profile: common_qa
+  rendering_profile: structured_chain
+
+retrieval:
+  retrieval_variant: full_hetero
+  seed_selection_variant: top_relevance
+  residual_selection: bridge_fullquery
+  candidate_cap:
+    enabled: false
+  bridge:
+    enabled: true
+    selection: bridge_fullquery
+    ordering: anchor_chain_aware
+    multi_anchor_bundle: true
+
