@@ -27,7 +27,7 @@ from scripts.analyze_failures import (
 from utils.eval_metrics import evaluate_predictions, summary_markdown
 from utils.generation import DEFAULT_RENDERING_PROFILE, PROMPT_TEMPLATES, RENDERING_PROFILES, add_token_accounting_fields, build_prompt, normalize_prediction_for_eval, render_context
 from utils.io_utils import dump_json, load_yaml, read_jsonl, write_jsonl
-from utils.text import safe_truncate
+from utils.text import token_count, safe_truncate
 
 
 def now_timestamp() -> str:
@@ -54,6 +54,7 @@ def find_latest_prediction_with_rendering(
     dataset: str | None,
     prompt_profile: str | None,
     rendering_profile: str | None,
+    exclude_context_truncation: bool = True,
 ) -> Path:
     candidates = []
     for path in iter_prediction_files(output_root):
@@ -69,6 +70,13 @@ def find_latest_prediction_with_rendering(
             continue
         if int(summary["n"]) <= 0:
             continue
+        if exclude_context_truncation:
+            try:
+                first = read_jsonl(path)[0]
+            except Exception:
+                first = {}
+            if first.get("context_truncation_enabled") or first.get("top_bundles") is not None or first.get("context_token_budget") is not None:
+                continue
         candidates.append(summary)
     if not candidates:
         filters = f"dataset={dataset!r} prompt_profile={prompt_profile!r} rendering_profile={rendering_profile!r}"
@@ -76,12 +84,58 @@ def find_latest_prediction_with_rendering(
     return max(candidates, key=lambda x: (float(x["mtime"]), str(x["path"])))["path"]
 
 
-def prompt_experiment_type(source_prompt: str, target_prompt: str, rendering_changed: bool) -> str:
+def prompt_experiment_type(source_prompt: str, target_prompt: str, rendering_changed: bool, context_truncation: bool = False) -> str:
+    if context_truncation:
+        return "context_budget_replay"
     if rendering_changed:
         return "rendering_replay"
     if target_prompt != source_prompt or target_prompt in {"qmrag_bundle_qa", "qmrag_bundle_light", "qmrag_bundle_tiny"}:
         return "replay_ablation"
     return "replay"
+
+
+def ordered_bundles_for_context(bundles: Sequence[Mapping[str, Any]], ordering_source: str) -> list[Mapping[str, Any]]:
+    if ordering_source == "raw_score":
+        return sorted(
+            list(bundles),
+            key=lambda bundle: float(bundle.get("score", 0.0) or 0.0),
+            reverse=True,
+        )
+    return list(bundles)
+
+
+def render_context_with_truncation(
+    bundles: Sequence[Mapping[str, Any]],
+    target_rendering: str,
+    cfg: Mapping[str, Any],
+    top_bundles: int | None,
+    context_token_budget: int | None,
+    ordering_source: str,
+) -> tuple[str, list[Mapping[str, Any]], int]:
+    original_bundles = list(bundles)
+    ordered = ordered_bundles_for_context(original_bundles, ordering_source)
+    candidates = ordered[: max(0, int(top_bundles))] if top_bundles is not None else ordered
+    max_chars = int(cfg.get("max_context_chars", 24000))
+    token_budget = cfg.get("context_token_budget")
+    if context_token_budget is None:
+        context = render_context(candidates, rendering_profile=target_rendering, max_chars=max_chars, token_budget=token_budget)
+        return context, list(candidates), max(0, len(original_bundles) - len(candidates))
+    selected: list[Mapping[str, Any]] = []
+    context = ""
+    for bundle in candidates:
+        trial = selected + [bundle]
+        trial_context = render_context(trial, rendering_profile=target_rendering, max_chars=max_chars, token_budget=None)
+        trial_tokens = token_count(trial_context)
+        if trial_tokens > int(context_token_budget) and selected:
+            break
+        selected = trial
+        context = trial_context
+        if trial_tokens >= int(context_token_budget):
+            break
+    if not selected and candidates:
+        selected = [candidates[0]]
+        context = render_context(selected, rendering_profile=target_rendering, max_chars=max_chars, token_budget=None)
+    return context, selected, max(0, len(original_bundles) - len(selected))
 
 
 def resolve_model(client: Any, configured: str) -> str:
@@ -147,6 +201,9 @@ def replay_rows(
     failure_category: str | None,
     no_llm: bool,
     dry_run: bool,
+    top_bundles: int | None = None,
+    context_token_budget: int | None = None,
+    ordering_source: str = "current",
 ) -> list[dict[str, Any]]:
     out = []
     selected = list(rows)
@@ -156,11 +213,24 @@ def replay_rows(
         selected = selected[:sample]
     if limit is not None:
         selected = selected[:limit]
+    context_truncation = top_bundles is not None or context_token_budget is not None or ordering_source != "current"
     rendering_changed = rerender_context and (target_rendering != source_rendering or any(str(row.get("rendering_profile") or source_rendering) != target_rendering for row in selected))
     for row in selected:
         source_context = context_from_row(row)
         source_hash = str(row.get("rendered_context_hash") or sha256_text(source_context))
-        if rerender_context:
+        original_bundle_count = len(row.get("evidence_bundles", []) or [])
+        rendered_bundles = list(row.get("evidence_bundles", []) or [])
+        dropped_bundle_count = 0
+        if context_truncation:
+            context, rendered_bundles, dropped_bundle_count = render_context_with_truncation(
+                row.get("evidence_bundles", []) or [],
+                target_rendering,
+                cfg,
+                top_bundles,
+                context_token_budget,
+                ordering_source,
+            )
+        elif rerender_context:
             context = render_context(
                 row.get("evidence_bundles", []) or [],
                 rendering_profile=target_rendering,
@@ -191,7 +261,14 @@ def replay_rows(
                 "source_rendering_profile": str(row.get("rendering_profile") or source_rendering),
                 "prompt_profile": target_prompt,
                 "rendering_profile": target_rendering,
-                "prompt_experiment_type": prompt_experiment_type(source_prompt, target_prompt, rendering_changed),
+                "prompt_experiment_type": prompt_experiment_type(source_prompt, target_prompt, rendering_changed, context_truncation),
+                "context_truncation_enabled": context_truncation,
+                "top_bundles": top_bundles,
+                "context_token_budget": context_token_budget,
+                "ordering_source": ordering_source,
+                "original_bundle_count": original_bundle_count,
+                "rendered_bundle_count": len(rendered_bundles),
+                "dropped_bundle_count": dropped_bundle_count,
                 "raw_prediction": str(gen.get("raw_prediction", "")),
                 "prediction": normalize_prediction_for_eval(gen.get("prediction", gen.get("raw_prediction", ""))),
                 "generation_provider": gen.get("generation_provider", "vllm"),
@@ -249,6 +326,9 @@ def main() -> None:
     parser.add_argument("--target-prompt", "--prompt-profile", dest="prompt_profile", default=None)
     parser.add_argument("--rendering-profile", choices=sorted(RENDERING_PROFILES), default=None)
     parser.add_argument("--failure-category", choices=FAILURE_CATEGORIES, default=None)
+    parser.add_argument("--top-bundles", type=int, default=None)
+    parser.add_argument("--context-token-budget", type=int, default=None)
+    parser.add_argument("--ordering-source", choices=["current", "raw_score"], default="current")
     parser.add_argument("--sample", type=int, default=None)
     parser.add_argument("--latest", action="store_true")
     parser.add_argument("--output-root", default="outputs/replay")
@@ -285,7 +365,25 @@ def main() -> None:
     target_rendering = str(args.rendering_profile or source_rendering or DEFAULT_RENDERING_PROFILE)
     cfg = load_generation_config(Path(args.config), args)
     cfg["rendering_profile"] = target_rendering
-    replayed = replay_rows(rows, dataset, source_prompt, target_prompt, source_rendering, target_rendering, bool(args.rendering_profile), cfg, args.limit, args.sample, args.failure_category, args.no_llm, args.dry_run)
+    context_truncation = args.top_bundles is not None or args.context_token_budget is not None or args.ordering_source != "current"
+    replayed = replay_rows(
+        rows,
+        dataset,
+        source_prompt,
+        target_prompt,
+        source_rendering,
+        target_rendering,
+        bool(args.rendering_profile),
+        cfg,
+        args.limit,
+        args.sample,
+        args.failure_category,
+        args.no_llm,
+        args.dry_run,
+        args.top_bundles,
+        args.context_token_budget,
+        args.ordering_source,
+    )
     expected_selected_count = len(rows)
     if args.failure_category:
         expected_selected_count = sum(1 for row in rows if classify_example(row)["failure_category"] == args.failure_category)
@@ -300,6 +398,13 @@ def main() -> None:
         suffix = f"{suffix}_{target_rendering}"
     if args.failure_category:
         suffix = f"{suffix}_{args.failure_category}"
+    if context_truncation:
+        if args.top_bundles is not None:
+            suffix = f"{suffix}_top{args.top_bundles}"
+        if args.context_token_budget is not None:
+            suffix = f"{suffix}_ctx{args.context_token_budget}"
+        if args.ordering_source != "current":
+            suffix = f"{suffix}_{args.ordering_source}"
     out_dir = Path(args.output_root) / timestamp / dataset / suffix
     out_dir.mkdir(parents=True, exist_ok=True)
     pred_out = out_dir / "predictions.jsonl"
@@ -314,7 +419,13 @@ def main() -> None:
             "rendering_profile": target_rendering,
             "target_rendering_profile": target_rendering,
             "failure_category": args.failure_category,
-            "prompt_experiment_type": prompt_experiment_type(source_prompt, target_prompt, bool(args.rendering_profile)),
+            "prompt_experiment_type": prompt_experiment_type(source_prompt, target_prompt, bool(args.rendering_profile), context_truncation),
+            "context_truncation_enabled": context_truncation,
+            "top_bundles": args.top_bundles,
+            "context_token_budget": args.context_token_budget,
+            "ordering_source": args.ordering_source,
+            "avg_rendered_bundle_count": sum(float(x.get("rendered_bundle_count", 0.0) or 0.0) for x in replayed) / max(1, len(replayed)),
+            "avg_dropped_bundle_count": sum(float(x.get("dropped_bundle_count", 0.0) or 0.0) for x in replayed) / max(1, len(replayed)),
             "source_row_count": len(rows),
             "selected_row_count": len(replayed),
             "row_count_matches_selection": len(replayed) == expected_selected_count,
@@ -341,6 +452,12 @@ def main() -> None:
                 "rendering_profile": target_rendering,
                 "failure_category": args.failure_category,
                 "prompt_experiment_type": result["prompt_experiment_type"],
+                "context_truncation_enabled": context_truncation,
+                "top_bundles": args.top_bundles,
+                "context_token_budget": args.context_token_budget,
+                "ordering_source": args.ordering_source,
+                "avg_rendered_bundle_count": result.get("avg_rendered_bundle_count"),
+                "avg_dropped_bundle_count": result.get("avg_dropped_bundle_count"),
                 "avg_prompt_template_tokens": result.get("avg_prompt_template_tokens"),
                 "avg_rendered_context_tokens": result.get("avg_rendered_context_tokens"),
                 "avg_input_prompt_tokens": result.get("avg_input_prompt_tokens"),
