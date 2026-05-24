@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ "$#" -lt 2 ]]; then
-  echo "Usage: bash scripts/run_prompt_ablation.sh <dataset> <limit> [main.py args...]" >&2
+if [[ "$#" -lt 1 ]]; then
+  echo "Usage: bash scripts/run_prompt_ablation.sh <dataset> [limit=10] [main.py args...]" >&2
   exit 2
 fi
 
 DATASET="$1"
-LIMIT="$2"
-shift 2
+LIMIT="${2:-10}"
+if [[ "$#" -ge 2 ]]; then
+  shift 2
+else
+  shift 1
+fi
 
 RUN_ID="${RUN_ID:-$(date +%Y%m%d_%H%M%S)}"
 
