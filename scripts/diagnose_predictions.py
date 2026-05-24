@@ -116,11 +116,21 @@ def summarize(path: Path) -> Dict[str, Any]:
         "QueryEmbCalls": result.get("num_query_embedding_calls", 0.0),
         "DenseSearchCalls": result.get("num_dense_search_calls", 0.0),
         "BM25SearchCalls": result.get("num_bm25_search_calls", 0.0),
+        "TitleSearchCalls": result.get("num_title_search_calls", 0.0),
+        "ChunkSearchCalls": result.get("num_chunk_search_calls", 0.0),
+        "PropSearchCalls": result.get("num_proposition_search_calls", 0.0),
+        "RawCandidates": result.get("raw_candidate_count", 0.0),
+        "UniqueCandidates": result.get("unique_candidate_count", 0.0),
+        "DuplicateCandidates": result.get("duplicate_candidate_count", 0.0),
         "CandScoreComp": result.get("num_candidate_score_computations", 0.0),
+        "CandScoreCacheHits": result.get("num_candidate_score_cache_hits", 0.0),
         "BridgeLookups": result.get("num_bridge_title_lookups", 0.0),
         "BridgeCacheHits": result.get("num_bridge_title_cache_hits", 0.0),
+        "BridgePropScoreComp": result.get("num_bridge_prop_score_computations", 0.0),
+        "BridgePropScoreCacheHits": result.get("num_bridge_prop_score_cache_hits", 0.0),
         "PairwiseComp": result.get("num_pairwise_similarity_computations", 0.0),
         "PairwiseCacheHits": result.get("num_pairwise_similarity_cache_hits", 0.0),
+        "PairwiseMatrixSize": result.get("pairwise_matrix_size", 0.0),
         "CandidateMergeReduction": result.get("candidate_merge_reduction_rate", 0.0),
         "idk_rate": result.get("idk_rate", 0.0),
         "insufficient_rate": result.get("insufficient_rate", 0.0),
@@ -146,7 +156,7 @@ def latest_by_dataset_prompt(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]
 
 
 def markdown_table(rows: List[Dict[str, Any]]) -> str:
-    headers=["dataset","prompt_profile","rendering_profile","retrieval_variant","seed_selection_variant","prompt_experiment_type","n","seed_title_rate","seed_chunk_rate","seed_proposition_rate","chain_from_title_rate","chain_from_chunk_rate","chain_from_proposition_rate","bridge_connected_rate","answer_slot_aligned_rate","chain_complete_v2_rate","anchor_connected_chain_complete_rate","anchor_mismatch_chain_rate","multi_anchor_bundle_rate","generic_relation_top1_rate","query_anchor_coverage_rate","avg_residual_coverage_count","chain_complete_rate","avg_bridge_title_count","avg_bridge_bundle_count","answer_in_evidence_bundles","answer_in_rendered_context","answer_in_prediction","idk_rate","insufficient_rate","CtxTok","LatencyMs","RetrievalMs","SeedSelectionMs","QueryEmbCalls","DenseSearchCalls","BM25SearchCalls","CandScoreComp","BridgeLookups","BridgeCacheHits","PairwiseComp","PairwiseCacheHits","CandidateMergeReduction","raw_none_rate","path"]
+    headers=["dataset","prompt_profile","rendering_profile","retrieval_variant","seed_selection_variant","prompt_experiment_type","n","seed_title_rate","seed_chunk_rate","seed_proposition_rate","chain_from_title_rate","chain_from_chunk_rate","chain_from_proposition_rate","bridge_connected_rate","answer_slot_aligned_rate","chain_complete_v2_rate","anchor_connected_chain_complete_rate","anchor_mismatch_chain_rate","multi_anchor_bundle_rate","generic_relation_top1_rate","query_anchor_coverage_rate","avg_residual_coverage_count","chain_complete_rate","avg_bridge_title_count","avg_bridge_bundle_count","answer_in_evidence_bundles","answer_in_rendered_context","answer_in_prediction","idk_rate","insufficient_rate","CtxTok","LatencyMs","RetrievalMs","SeedSelectionMs","QueryEmbCalls","DenseSearchCalls","BM25SearchCalls","TitleSearchCalls","ChunkSearchCalls","PropSearchCalls","RawCandidates","UniqueCandidates","DuplicateCandidates","CandScoreComp","CandScoreCacheHits","BridgeLookups","BridgeCacheHits","BridgePropScoreComp","BridgePropScoreCacheHits","PairwiseComp","PairwiseCacheHits","PairwiseMatrixSize","CandidateMergeReduction","raw_none_rate","path"]
     lines=["| "+" | ".join(headers)+" |","| "+" | ".join(["---"]*len(headers))+" |"]
     for row in rows:
         lines.append(
@@ -189,11 +199,21 @@ def markdown_table(rows: List[Dict[str, Any]]) -> str:
                 f"{float(row['QueryEmbCalls']):.2f}",
                 f"{float(row['DenseSearchCalls']):.2f}",
                 f"{float(row['BM25SearchCalls']):.2f}",
+                f"{float(row['TitleSearchCalls']):.2f}",
+                f"{float(row['ChunkSearchCalls']):.2f}",
+                f"{float(row['PropSearchCalls']):.2f}",
+                f"{float(row['RawCandidates']):.2f}",
+                f"{float(row['UniqueCandidates']):.2f}",
+                f"{float(row['DuplicateCandidates']):.2f}",
                 f"{float(row['CandScoreComp']):.2f}",
+                f"{float(row['CandScoreCacheHits']):.2f}",
                 f"{float(row['BridgeLookups']):.2f}",
                 f"{float(row['BridgeCacheHits']):.2f}",
+                f"{float(row['BridgePropScoreComp']):.2f}",
+                f"{float(row['BridgePropScoreCacheHits']):.2f}",
                 f"{float(row['PairwiseComp']):.2f}",
                 f"{float(row['PairwiseCacheHits']):.2f}",
+                f"{float(row['PairwiseMatrixSize']):.2f}",
                 f"{float(row['CandidateMergeReduction']):.4f}",
                 f"{float(row['raw_none_rate']):.4f}",
                 str(row["path"]),

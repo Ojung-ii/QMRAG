@@ -25,6 +25,8 @@ def parse_args():
     p.add_argument("--rendering-profile", choices=sorted(RENDERING_PROFILES), default=None)
     p.add_argument("--retrieval-variant", choices=["full_hetero","prop_text_only","prop_parent_anchor","prop_parent_mention_bidirectional"], default=None)
     p.add_argument("--seed-selection-variant", choices=["medoid_current","top_relevance","anchor_first","chain_potential"], default=None)
+    p.add_argument("--candidate-pool-size", type=int, default=None, help="Enable candidate cap ablation with this total candidate count.")
+    p.add_argument("--stable-dedup-before-seed", action="store_true", help="Enable stable candidate dedup before seed selection as an ablation flag.")
     p.add_argument("--enable-timing", action="store_true")
     p.add_argument("--continue-on-error", action="store_true")
     return p.parse_args()
@@ -54,6 +56,12 @@ def apply_overrides(cfg: Dict[str,Any], args) -> Dict[str,Any]:
         cfg.setdefault("retrieval",{})["retrieval_variant"]=args.retrieval_variant
     if args.seed_selection_variant:
         cfg.setdefault("retrieval",{})["seed_selection_variant"]=args.seed_selection_variant
+    if args.candidate_pool_size is not None:
+        cap_cfg=cfg.setdefault("retrieval",{}).setdefault("candidate_cap",{})
+        cap_cfg["enabled"]=True
+        cap_cfg["total_candidates"]=int(args.candidate_pool_size)
+    if args.stable_dedup_before_seed:
+        cfg.setdefault("retrieval",{}).setdefault("optimization",{})["stable_dedup_before_seed"]=True
     if args.enable_timing:
         cfg.setdefault("run",{})["enable_timing"]=True
     idx_emb=cfg.get("indexing",{}).get("embedding",{})
@@ -193,7 +201,7 @@ def copy_compat_outputs(out_dir: Path, compat_dir: Path) -> None:
     if out_dir.resolve()==compat_dir.resolve():
         return
     ensure_dir(compat_dir)
-    for name in ("config.yaml","predictions.jsonl","예측결과.jsonl","eval.json","eval_summary.md","timing_events.jsonl","timing_summary.json","timing_summary.md"):
+    for name in ("config.yaml","predictions.jsonl","예측결과.jsonl","eval.json","eval_summary.md","timing_events.jsonl","timing_summary.json","timing_summary.md","runtime_diagnostics_summary.md"):
         src=out_dir/name
         if src.exists():
             shutil.copy2(src,compat_dir/name)
@@ -248,6 +256,51 @@ def log_retrieval_summary(preds: list[Mapping[str,Any]], logger: ExperimentLogge
     summary["retrieval_ms"]=round(sum(totals)/max(1,len(totals)),6)
     logger.log("Retrieval summary: "+json.dumps(summary,ensure_ascii=False))
     logger.event({"event":"retrieval.summary",**summary})
+
+def runtime_diagnostics_markdown(dataset: str, result: Mapping[str,Any], timing_summary: Mapping[str,Any] | None = None) -> str:
+    timing_summary=timing_summary or {}
+    stages=dict(timing_summary.get("stages",{}) or {})
+    timing_rows=[]
+    for stage,row in sorted(stages.items(), key=lambda kv: float((kv[1] or {}).get("total_ms",0.0) or 0.0), reverse=True):
+        timing_rows.append((stage,row))
+    metric_rows=[
+        ("dataset",dataset),
+        ("retrieval_variant",result.get("retrieval_variant","full_hetero")),
+        ("seed_selection_variant",result.get("seed_selection_variant","medoid_current")),
+        ("n",result.get("n",0)),
+        ("retrieval_ms",f"{result.get('retrieval_latency_ms',0):.3f}"),
+        ("seed_selection_ms",f"{result.get('seed_selection_ms',0):.3f}"),
+        ("num_query_embedding_calls",f"{result.get('num_query_embedding_calls',0):.3f}"),
+        ("num_dense_search_calls",f"{result.get('num_dense_search_calls',0):.3f}"),
+        ("num_bm25_search_calls",f"{result.get('num_bm25_search_calls',0):.3f}"),
+        ("num_title_search_calls",f"{result.get('num_title_search_calls',0):.3f}"),
+        ("num_chunk_search_calls",f"{result.get('num_chunk_search_calls',0):.3f}"),
+        ("num_proposition_search_calls",f"{result.get('num_proposition_search_calls',0):.3f}"),
+        ("raw_candidate_count",f"{result.get('raw_candidate_count',0):.3f}"),
+        ("unique_candidate_count",f"{result.get('unique_candidate_count',0):.3f}"),
+        ("duplicate_candidate_count",f"{result.get('duplicate_candidate_count',0):.3f}"),
+        ("candidate_merge_reduction_rate",f"{result.get('candidate_merge_reduction_rate',0):.4f}"),
+        ("num_candidate_score_computations",f"{result.get('num_candidate_score_computations',0):.3f}"),
+        ("num_candidate_score_cache_hits",f"{result.get('num_candidate_score_cache_hits',0):.3f}"),
+        ("num_bridge_title_lookups",f"{result.get('num_bridge_title_lookups',0):.3f}"),
+        ("num_bridge_title_cache_hits",f"{result.get('num_bridge_title_cache_hits',0):.3f}"),
+        ("num_bridge_prop_score_computations",f"{result.get('num_bridge_prop_score_computations',0):.3f}"),
+        ("num_bridge_prop_score_cache_hits",f"{result.get('num_bridge_prop_score_cache_hits',0):.3f}"),
+        ("unique_bridge_title_count",f"{result.get('unique_bridge_title_count',0):.3f}"),
+        ("duplicate_bridge_title_count",f"{result.get('duplicate_bridge_title_count',0):.3f}"),
+        ("num_pairwise_similarity_computations",f"{result.get('num_pairwise_similarity_computations',0):.3f}"),
+        ("num_pairwise_similarity_cache_hits",f"{result.get('num_pairwise_similarity_cache_hits',0):.3f}"),
+        ("pairwise_matrix_size",f"{result.get('pairwise_matrix_size',0):.3f}"),
+        ("candidate_count_by_type",json.dumps(result.get("candidate_count_by_type",{}),ensure_ascii=False)),
+        ("seed_unit_type_distribution",json.dumps(result.get("seed_unit_type_distribution",{}),ensure_ascii=False)),
+    ]
+    lines=["# Runtime Diagnostics Summary","",f"- dataset: {dataset}","", "## Duplicate And Cache Diagnostics", "", "| metric | value |", "|---|---:|"]
+    lines.extend(f"| {k} | {v} |" for k,v in metric_rows)
+    lines.extend(["", "## Timing Bottlenecks", "", "| stage | count | total_ms | mean_ms | p50_ms | p95_ms | max_ms | extra_mean |", "|---|---:|---:|---:|---:|---:|---:|---|"])
+    for stage,row in timing_rows:
+        extra=json.dumps(row.get("extra_mean",{}),ensure_ascii=False,sort_keys=True)
+        lines.append(f"| {stage} | {row.get('count',0)} | {row.get('total_ms',0):.3f} | {row.get('mean_ms',0):.3f} | {row.get('p50_ms',0):.3f} | {row.get('p95_ms',0):.3f} | {row.get('max_ms',0):.3f} | {extra} |")
+    return "\n".join(lines)+"\n"
 
 def eval_only(dataset: str, out_dir: Path, logger: ExperimentLogger, prompt_profile: str | None = None, compat_dir: Path | None = None):
     path=out_dir/"예측결과.jsonl" if (out_dir/"예측결과.jsonl").exists() else out_dir/"predictions.jsonl"
@@ -353,6 +406,7 @@ def run_dataset(dataset: str, cfg: Dict[str,Any], args, timestamp: str):
     timing_summary=timing.write_summary()
     if timing_summary:
         res["timing_summary"]=timing_summary
+    (out_dir/"runtime_diagnostics_summary.md").write_text(runtime_diagnostics_markdown(dataset,res,timing_summary),encoding="utf-8")
     copy_compat_outputs(out_dir,compat_dir)
     return {"dataset":dataset, **{k:v for k,v in res.items() if k!="per_example"}}
 

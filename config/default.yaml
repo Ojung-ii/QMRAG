@@ -45,6 +45,14 @@ retrieval:
   search_units: [proposition, chunk, entity]
   candidate_top_k: 80
   min_candidate_pool: 80
+  candidate_cap:
+    enabled: false
+    total_candidates: 80
+    title_candidates: null
+    chunk_candidates: null
+    proposition_candidates: null
+  optimization:
+    stable_dedup_before_seed: false
   seed_count: 4
   seed_trials: 7
   sample_multiplier: 6

@@ -39,20 +39,21 @@ def infer_seed_variant(rows: Iterable[Mapping[str, Any]]) -> str:
 
 def summarize_path(path: Path) -> dict[str, Any] | None:
     try:
-        rows = read_jsonl(path)
+        with path.open("r", encoding="utf-8") as f:
+            first_line = next((line for line in f if line.strip()), "")
+        if not first_line:
+            return None
+        first = json.loads(first_line)
     except Exception:
         return None
-    if not rows:
-        return None
-    first = rows[0]
     return {
         "path": path,
-        "dataset": infer_dataset(path, rows),
-        "seed_selection_variant": infer_seed_variant(rows),
+        "dataset": str(first.get("dataset") or infer_dataset(path, [first])),
+        "seed_selection_variant": infer_seed_variant([first]),
+        "candidate_cap_enabled": bool((first.get("retrieval_diagnostics", {}) or {}).get("candidate_cap_enabled", False)),
         "retrieval_variant": str(first.get("retrieval_variant") or (first.get("retrieval_diagnostics", {}) or {}).get("retrieval_variant") or "full_hetero"),
         "prompt_profile": str(first.get("prompt_profile", "common_qa")),
         "rendering_profile": str(first.get("rendering_profile", "structured_chain")),
-        "n": len(rows),
         "mtime": path.stat().st_mtime,
     }
 
@@ -68,6 +69,8 @@ def find_latest_variant_run(output_root: Path, dataset: str, variant: str) -> Pa
         if summary["seed_selection_variant"] != variant:
             continue
         if summary["retrieval_variant"] != "full_hetero":
+            continue
+        if summary.get("candidate_cap_enabled"):
             continue
         if summary["prompt_profile"] != "common_qa" or summary["rendering_profile"] != "structured_chain":
             continue
@@ -95,6 +98,7 @@ def summarize_run(path: Path, dataset: str, variant: str) -> dict[str, Any]:
         "anchor_connected_chain_complete_rate": result.get("anchor_connected_chain_complete_rate", 0.0),
         "anchor_mismatch_chain_rate": result.get("anchor_mismatch_chain_rate", 0.0),
         "retrieval_ms": result.get("retrieval_latency_ms", 0.0),
+        "candidate_retrieval_ms": _stage_mean(timing, "candidate_retrieval"),
         "seed_selection_ms": result.get("seed_selection_ms", 0.0),
         "generation_ms": result.get("generation_latency_ms", 0.0),
         "total_ms": result.get("latency_ms", 0.0),
@@ -106,13 +110,25 @@ def summarize_run(path: Path, dataset: str, variant: str) -> dict[str, Any]:
         "num_query_embedding_calls": result.get("num_query_embedding_calls", 0.0),
         "num_dense_search_calls": result.get("num_dense_search_calls", 0.0),
         "num_bm25_search_calls": result.get("num_bm25_search_calls", 0.0),
+        "num_title_search_calls": result.get("num_title_search_calls", 0.0),
+        "num_chunk_search_calls": result.get("num_chunk_search_calls", 0.0),
+        "num_proposition_search_calls": result.get("num_proposition_search_calls", 0.0),
+        "raw_candidate_count": result.get("raw_candidate_count", 0.0),
+        "unique_candidate_count": result.get("unique_candidate_count", 0.0),
         "num_candidate_score_computations": result.get("num_candidate_score_computations", 0.0),
         "num_bridge_title_lookups": result.get("num_bridge_title_lookups", 0.0),
+        "num_bridge_prop_score_computations": result.get("num_bridge_prop_score_computations", 0.0),
         "num_pairwise_similarity_computations": result.get("num_pairwise_similarity_computations", 0.0),
         "num_pairwise_similarity_cache_hits": result.get("num_pairwise_similarity_cache_hits", 0.0),
+        "pairwise_matrix_size": result.get("pairwise_matrix_size", 0.0),
         "candidate_merge_reduction_rate": result.get("candidate_merge_reduction_rate", 0.0),
         "timing_top_bottlenecks": top_bottlenecks(timing),
     }
+
+
+def _stage_mean(timing: Mapping[str, Any], stage: str) -> float:
+    row = (timing.get("stages", {}) or {}).get(stage, {}) or {}
+    return float(row.get("mean_ms", 0.0) or 0.0)
 
 
 def fmt(value: Any) -> str:
@@ -137,6 +153,7 @@ def markdown(dataset: str, rows: list[Mapping[str, Any]], missing: list[str]) ->
         "anchor_connected_chain_complete_rate",
         "anchor_mismatch_chain_rate",
         "retrieval_ms",
+        "candidate_retrieval_ms",
         "seed_selection_ms",
         "total_ms",
         "CtxTok",
@@ -145,10 +162,17 @@ def markdown(dataset: str, rows: list[Mapping[str, Any]], missing: list[str]) ->
         "num_query_embedding_calls",
         "num_dense_search_calls",
         "num_bm25_search_calls",
+        "num_title_search_calls",
+        "num_chunk_search_calls",
+        "num_proposition_search_calls",
+        "raw_candidate_count",
+        "unique_candidate_count",
         "num_candidate_score_computations",
         "num_bridge_title_lookups",
+        "num_bridge_prop_score_computations",
         "num_pairwise_similarity_computations",
         "num_pairwise_similarity_cache_hits",
+        "pairwise_matrix_size",
         "candidate_merge_reduction_rate",
     ]
     lines = ["# Seed Selection Ablation", "", f"- dataset: {dataset}", ""]
