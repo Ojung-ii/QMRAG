@@ -1,0 +1,20 @@
+extends: qmrag_v2_common_full.yaml
+
+generation:
+  prompt_profile: common_qa
+  rendering_profile: structured_chain
+  token_counting:
+    enabled: true
+    tokenizer_model: auto
+    fallback_to_estimate: true
+
+sota_config:
+  role: compact_efficiency_common_top3
+  prompt_experiment_type: compact_ablation
+  context: top_bundles
+  top_bundles: 3
+  context_token_budget: null
+  notes:
+    - Unified compact efficiency ablation across datasets.
+    - Implement with replay_generation.py --top-bundles 3 to avoid rerunning retrieval.
+    - This is not the main default.
