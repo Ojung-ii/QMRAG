@@ -28,6 +28,7 @@ from scripts.analyze_failures import (
 from utils.eval_metrics import evaluate_predictions, summary_markdown
 from utils.generation import (
     ACE_NATIVE_PROMPT_VARIANTS,
+    ACE_RENDERER_VARIANTS,
     infer_ace_native_prompt_variant,
     resolve_ace_native_prompt_profile,
     COMPACTION_PROFILES,
@@ -159,6 +160,7 @@ def render_context_with_truncation(
     ordering_source: str,
     compaction_profile: str = "none",
     max_sentences_per_bundle: int = 3,
+    ace_renderer_variant: str = "r0_current",
 ) -> tuple[str, list[Mapping[str, Any]], int, dict[str, Any]]:
     original_bundles = list(bundles)
     ordered = ordered_bundles_for_context(original_bundles, ordering_source)
@@ -178,6 +180,7 @@ def render_context_with_truncation(
                 token_budget=effective_budget,
                 compaction_profile=compaction_profile,
                 max_sentences_per_bundle=max_sentences_per_bundle,
+                ace_renderer_variant=ace_renderer_variant,
             )
             actual_tokens = count_tokens(context, tokenizer)
             if actual_tokens <= int(context_token_budget) or effective_budget <= 1:
@@ -200,6 +203,7 @@ def render_context_with_truncation(
             token_budget=token_budget,
             compaction_profile=compaction_profile,
             max_sentences_per_bundle=max_sentences_per_bundle,
+            ace_renderer_variant=ace_renderer_variant,
         )
         return context, list(candidates), max(0, len(original_bundles) - len(candidates)), stats
     selected: list[Mapping[str, Any]] = []
@@ -214,6 +218,7 @@ def render_context_with_truncation(
             token_budget=None,
             compaction_profile=compaction_profile,
             max_sentences_per_bundle=max_sentences_per_bundle,
+            ace_renderer_variant=ace_renderer_variant,
         )
         trial_tokens = token_count(trial_context)
         if trial_tokens > int(context_token_budget) and selected:
@@ -232,6 +237,7 @@ def render_context_with_truncation(
             token_budget=None,
             compaction_profile=compaction_profile,
             max_sentences_per_bundle=max_sentences_per_bundle,
+            ace_renderer_variant=ace_renderer_variant,
         )
     return context, selected, max(0, len(original_bundles) - len(selected)), stats
 
@@ -305,6 +311,8 @@ def replay_rows(
     compaction_profile: str = "none",
     max_sentences_per_bundle: int = 3,
     ace_native_prompt_variant: str | None = None,
+    ace_renderer_variant: str = "r0_current",
+    save_final_prompt: bool = False,
 ) -> list[dict[str, Any]]:
     out = []
     selected = list(rows)
@@ -345,6 +353,7 @@ def replay_rows(
                 ordering_source,
                 compaction_profile=compaction_profile,
                 max_sentences_per_bundle=max_sentences_per_bundle,
+                ace_renderer_variant=ace_renderer_variant,
             )
         elif rerender_context:
             context, compaction_stats = render_context_with_metadata(
@@ -354,6 +363,7 @@ def replay_rows(
                 token_budget=row_cfg.get("context_token_budget"),
                 compaction_profile="none",
                 max_sentences_per_bundle=max_sentences_per_bundle,
+                ace_renderer_variant=ace_renderer_variant,
             )
         else:
             context = source_context
@@ -379,6 +389,7 @@ def replay_rows(
                 "source_rendering_profile": str(row.get("rendering_profile") or source_rendering),
                 "prompt_profile": target_prompt,
                 "ace_native_prompt_variant": ace_native_prompt_variant or infer_ace_native_prompt_variant(target_prompt),
+                "ace_renderer_variant": ace_renderer_variant,
                 "rendering_profile": target_rendering,
                 "prompt_experiment_type": prompt_experiment_type(source_prompt, target_prompt, rendering_changed, context_truncation, context_compaction),
                 "context_truncation_enabled": context_truncation,
@@ -409,6 +420,9 @@ def replay_rows(
                 "prompt_hash": sha256_text(prompt),
             }
         )
+        if save_final_prompt:
+            new_row["final_prompt_text"] = prompt
+            new_row["prompt"] = prompt
         new_row = add_token_accounting_fields(
             new_row,
             prompt,
@@ -419,6 +433,14 @@ def replay_rows(
             usage=new_row.get("llm_usage"),
             model=new_row.get("llm_model") or row.get("llm_model"),
         )
+        answers = row.get("answers")
+        if isinstance(answers, list) and answers:
+            new_row["gold_answer"] = str(answers[0])
+        elif row.get("answer") is not None:
+            new_row["gold_answer"] = str(row.get("answer"))
+        new_row["context_tokens"] = int(new_row.get("rendered_context_tokens", 0) or 0)
+        new_row["prompt_tokens"] = int(new_row.get("input_prompt_tokens", 0) or 0)
+        new_row["top_k"] = effective_top_bundles
         if source_input_tokens is None:
             try:
                 source_input_tokens = token_count(build_prompt(str(row.get("question", "")), source_context, source_prompt))
@@ -508,6 +530,7 @@ def main() -> None:
     parser.add_argument("--source-rendering-profile", default=None)
     parser.add_argument("--target-prompt", "--prompt-profile", dest="prompt_profile", default=None)
     parser.add_argument("--ace-native-prompt-variant", choices=ACE_NATIVE_PROMPT_VARIANTS, default=None)
+    parser.add_argument("--ace-renderer-variant", choices=ACE_RENDERER_VARIANTS, default="r0_current")
     parser.add_argument("--rendering-profile", choices=sorted(RENDERING_PROFILES), default=None)
     parser.add_argument("--failure-category", choices=FAILURE_CATEGORIES, default=None)
     parser.add_argument("--top-bundles", type=int, default=None)
@@ -529,6 +552,8 @@ def main() -> None:
     parser.add_argument("--vllm-base-url", default=None)
     parser.add_argument("--vllm-model", default=None)
     parser.add_argument("--vllm-api-key", default=None)
+    parser.add_argument("--save-rendered-context", action="store_true")
+    parser.add_argument("--save-final-prompt", action="store_true")
     args = parser.parse_args()
 
     ace_variant = args.ace_native_prompt_variant
@@ -562,9 +587,11 @@ def main() -> None:
     cfg = load_generation_config(Path(args.config), args)
     cfg["prompt_profile"] = target_prompt
     cfg["rendering_profile"] = target_rendering
+    cfg["ace_renderer_variant"] = args.ace_renderer_variant
     effective_top_bundles = 3 if str(args.compaction_profile or "none") in {"top3_chain_dedup", "top3_chain_dedup_no_sources"} and args.top_bundles is None else args.top_bundles
     context_truncation = effective_top_bundles is not None or args.context_token_budget is not None or args.ordering_source != "current"
     context_compaction = str(args.compaction_profile or "none") != "none"
+    renderer_changed = str(args.ace_renderer_variant or "r0_current") != "r0_current"
     replayed = replay_rows(
         rows,
         dataset,
@@ -585,6 +612,8 @@ def main() -> None:
         args.compaction_profile,
         args.max_sentences_per_bundle,
         ace_variant,
+        args.ace_renderer_variant,
+        args.save_final_prompt,
     )
     expected_selected_count = len(rows)
     if args.failure_category:
@@ -611,6 +640,8 @@ def main() -> None:
         suffix = f"{suffix}_{args.compaction_profile}"
         if args.compaction_profile in {"sentence_cap", "sentence_cap_no_sources"}:
             suffix = f"{suffix}{args.max_sentences_per_bundle}"
+    if renderer_changed:
+        suffix = f"{suffix}_{args.ace_renderer_variant}"
     out_dir = Path(args.output_dir) if args.output_dir else Path(args.output_root) / timestamp / dataset / suffix
     out_dir.mkdir(parents=True, exist_ok=True)
     pred_out = out_dir / "predictions.jsonl"
@@ -622,6 +653,7 @@ def main() -> None:
             "source_prompt_profile": source_prompt,
             "target_prompt_profile": target_prompt,
             "ace_native_prompt_variant": ace_variant or infer_ace_native_prompt_variant(target_prompt),
+            "ace_renderer_variant": args.ace_renderer_variant,
             "source_rendering_profile": source_rendering,
             "rendering_profile": target_rendering,
             "target_rendering_profile": target_rendering,
@@ -675,6 +707,7 @@ def main() -> None:
         "method": "ACE-RAG",
         "prompt_setting": target_prompt,
         "ace_native_prompt_variant": ace_variant or infer_ace_native_prompt_variant(target_prompt),
+        "ace_renderer_variant": args.ace_renderer_variant,
         "top_bundles": effective_top_bundles,
         "qa_top_k": effective_top_bundles,
         "compaction_profile": str(args.compaction_profile or "none"),
@@ -715,6 +748,7 @@ def main() -> None:
                 "evidence_bundles_hash_match_rate": result["evidence_bundles_hash_match_rate"],
                 "prompt_profile": target_prompt,
                 "ace_native_prompt_variant": ace_variant or infer_ace_native_prompt_variant(target_prompt),
+                "ace_renderer_variant": args.ace_renderer_variant,
                 "rendering_profile": target_rendering,
                 "failure_category": args.failure_category,
                 "prompt_experiment_type": result["prompt_experiment_type"],

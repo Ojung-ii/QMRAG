@@ -37,6 +37,13 @@ COMPACTION_PROFILES = (
     "top3_schema_dedup",
 )
 
+ACE_RENDERER_VARIANTS = (
+    "r0_current",
+    "r1_clean_sentence",
+    "r2_title_paragraph",
+    "r3_chain_paragraph_hybrid",
+)
+
 PROMPT_TEMPLATES = {
     # Main fair-comparison prompt. Do not change for QMRAG/baseline comparisons.
     "common_qa": """You are a QA assistant.
@@ -1203,6 +1210,170 @@ def _render_chain_dedup(bundles: Sequence[Mapping[str,Any]], max_chars: int) -> 
         parts.append("")
     return safe_truncate("\n".join(parts).strip(), max_chars)
 
+def _clean_records_for_bundle(bundle: Mapping[str,Any], include_source_fallback: bool = True) -> list[dict[str,Any]]:
+    chain=_chain_records(bundle)
+    chain_norms={r.get("norm","") for r in chain if r.get("norm")}
+    records=chain+_prop_records(bundle,chain_norms)
+    if include_source_fallback and not records:
+        records.extend(_source_records(bundle,chain_norms,limit_per_chunk=1))
+    return records
+
+def _append_plain_sentence(lines: list[str], seen: set[str], rec: Mapping[str,Any]) -> bool:
+    norm=str(rec.get("norm") or _sentence_norm(rec.get("text")))
+    text=str(rec.get("text") or "").strip()
+    if not norm or norm in seen or not text:
+        return False
+    seen.add(norm)
+    lines.append(text)
+    return True
+
+def _append_title_sentence(lines: list[str], seen: set[str], rec: Mapping[str,Any]) -> bool:
+    norm=str(rec.get("norm") or _sentence_norm(rec.get("text")))
+    title=str(rec.get("title") or "").strip()
+    text=str(rec.get("text") or "").strip()
+    if not norm or norm in seen or not text:
+        return False
+    seen.add(norm)
+    lines.append(f"{title}: {text}" if title else text)
+    return True
+
+def _render_clean_sentence(bundles: Sequence[Mapping[str,Any]], max_chars: int) -> str:
+    parts: list[str]=[]
+    seen:set[str]=set()
+    for bundle in bundles:
+        records=_clean_records_for_bundle(bundle)
+        if not records:
+            continue
+        anchors=bundle.get("anchor_titles") if bundle.get("bundle_type")=="multi_anchor" else None
+        anchor="; ".join(str(x) for x in anchors or [] if str(x).strip()) or str(bundle.get("anchor_title") or bundle.get("title") or "").strip()
+        block=[f"Title: {anchor}" if anchor else "Title:"]
+        before=len(seen)
+        for rec in records:
+            _append_title_sentence(block,seen,rec)
+        if len(seen)>before:
+            parts.extend(block); parts.append("")
+    return safe_truncate("\n".join(parts).strip(), max_chars)
+
+def _render_title_paragraph(bundles: Sequence[Mapping[str,Any]], max_chars: int) -> str:
+    grouped: dict[str,list[str]]={}
+    title_order: list[str]=[]
+    seen:set[str]=set()
+    for bundle in bundles:
+        records=_clean_records_for_bundle(bundle)
+        for rec in records:
+            norm=str(rec.get("norm") or _sentence_norm(rec.get("text")))
+            text=str(rec.get("text") or "").strip()
+            if not norm or norm in seen or not text:
+                continue
+            seen.add(norm)
+            title=str(rec.get("title") or bundle.get("anchor_title") or bundle.get("title") or "").strip()
+            if not title:
+                title="Evidence"
+            if title not in grouped:
+                grouped[title]=[]; title_order.append(title)
+            grouped[title].append(text)
+    parts: list[str]=[]
+    for title in title_order:
+        sentences=grouped.get(title,[])
+        if not sentences:
+            continue
+        parts.append(f"Wikipedia Title: {title}")
+        parts.append(" ".join(sentences))
+        parts.append("")
+    return safe_truncate("\n".join(parts).strip(), max_chars)
+
+def _render_multi_anchor_hybrid(parts: list[str], seen: set[str], bundle: Mapping[str,Any], idx: int) -> bool:
+    anchors=[str(x) for x in bundle.get("anchor_titles",[]) or [] if str(x).strip()]
+    if not anchors and bundle.get("anchor_title"):
+        anchors=[str(bundle.get("anchor_title"))]
+    records=_clean_records_for_bundle(bundle)
+    if not records:
+        return False
+    parts.append(f"Multi-Anchor Evidence {idx}")
+    if anchors:
+        parts.append("Anchors: "+"; ".join(anchors))
+    grouped: dict[str,list[Mapping[str,Any]]]={}
+    order: list[str]=[]
+    for rec in records:
+        title=str(rec.get("title") or "").strip() or (anchors[0] if anchors else "Evidence")
+        if title not in grouped:
+            grouped[title]=[]; order.append(title)
+        grouped[title].append(rec)
+    for title in order:
+        local_before=len(seen)
+        local: list[str]=[f"Anchor: {title}"]
+        for rec in grouped[title]:
+            _append_plain_sentence(local,seen,rec)
+        if len(seen)>local_before:
+            parts.extend(local)
+    parts.append("")
+    return True
+
+def _render_chain_paragraph_hybrid(bundles: Sequence[Mapping[str,Any]], max_chars: int) -> str:
+    parts: list[str]=[]
+    seen:set[str]=set()
+    idx=1
+    for bundle in bundles:
+        if bundle.get("bundle_type")=="multi_anchor":
+            if _render_multi_anchor_hybrid(parts,seen,bundle,idx):
+                idx+=1
+            continue
+        chain=_chain_records(bundle)
+        chain_norms={r.get("norm","") for r in chain if r.get("norm")}
+        support=_prop_records(bundle,chain_norms)
+        if chain:
+            before=len(seen)
+            block=[f"Evidence Chain {idx}"]
+            anchor=str(bundle.get("anchor_title") or "").strip()
+            bridge=", ".join(str(x) for x in bundle.get("bridge_titles",[]) or [] if str(x).strip())
+            if anchor:
+                block.append(f"Question anchor: {anchor}")
+            if bridge:
+                block.append(f"Bridge entity: {bridge}")
+            connection=[r for r in chain if str(r.get("role"))=="chain_seed"]
+            answer=[r for r in chain if str(r.get("role"))=="chain_bridge"]+support
+            if connection:
+                block.append("Connection evidence:")
+                for rec in connection:
+                    _append_plain_sentence(block,seen,rec)
+            if answer:
+                block.append("Answer evidence:")
+                for rec in answer:
+                    _append_plain_sentence(block,seen,rec)
+            if len(seen)>before:
+                parts.extend(block); parts.append(""); idx+=1
+            continue
+        records=support or _source_records(bundle,limit_per_chunk=1)
+        if not records:
+            continue
+        before=len(seen)
+        anchor=str(bundle.get("anchor_title") or bundle.get("title") or "").strip()
+        block=[f"Supporting Evidence {idx}"]
+        if anchor:
+            block.append(f"Anchor: {anchor}")
+        block.append("Evidence:")
+        for rec in records:
+            _append_plain_sentence(block,seen,rec)
+        if len(seen)>before:
+            parts.extend(block); parts.append(""); idx+=1
+    return safe_truncate("\n".join(parts).strip(), max_chars)
+
+def render_ace_renderer_context(
+    bundles: Sequence[Mapping[str,Any]],
+    renderer_variant: str = "r0_current",
+    max_chars: int = 24000,
+) -> str:
+    variant=str(renderer_variant or "r0_current")
+    if variant not in ACE_RENDERER_VARIANTS:
+        raise ValueError(f"Unsupported ace_renderer_variant={variant!r}; choices={list(ACE_RENDERER_VARIANTS)}")
+    if variant=="r1_clean_sentence":
+        return _render_clean_sentence(bundles,max_chars)
+    if variant=="r2_title_paragraph":
+        return _render_title_paragraph(bundles,max_chars)
+    if variant=="r3_chain_paragraph_hybrid":
+        return _render_chain_paragraph_hybrid(bundles,max_chars)
+    raise ValueError("r0_current must be handled by the existing renderer")
+
 def _render_chain_dedup_keep_sources(
     bundles: Sequence[Mapping[str,Any]],
     max_chars: int,
@@ -1609,6 +1780,7 @@ def render_context(
     token_budget: int | None = None,
     compaction_profile: str = "none",
     max_sentences_per_bundle: int = 3,
+    ace_renderer_variant: str = "r0_current",
     **_: Any,
 ) -> str:
     profile=str(rendering_profile or DEFAULT_RENDERING_PROFILE)
@@ -1617,9 +1789,14 @@ def render_context(
     compact=str(compaction_profile or "none")
     if compact not in COMPACTION_PROFILES:
         raise ValueError(f"Unsupported compaction_profile={compact!r}; choices={list(COMPACTION_PROFILES)}")
+    renderer=str(ace_renderer_variant or "r0_current")
+    if renderer not in ACE_RENDERER_VARIANTS:
+        raise ValueError(f"Unsupported ace_renderer_variant={renderer!r}; choices={list(ACE_RENDERER_VARIANTS)}")
     char_budget=int(max_chars or 24000)
     if token_budget:
         char_budget=min(char_budget, int(token_budget)*6)
+    if renderer!="r0_current":
+        return render_ace_renderer_context(evidence_bundles,renderer,char_budget)
     if compact!="none":
         return _render_compacted_context(evidence_bundles,char_budget,compact,max_sentences_per_bundle=max_sentences_per_bundle,token_budget=token_budget)
     if profile=="structured_chain":
@@ -1639,6 +1816,7 @@ def render_context_with_metadata(
     token_budget: int | None = None,
     compaction_profile: str = "none",
     max_sentences_per_bundle: int = 3,
+    ace_renderer_variant: str = "r0_current",
 ) -> tuple[str,dict[str,Any]]:
     original_stats=bundle_sentence_statistics(evidence_bundles)
     context=render_context(
@@ -1648,6 +1826,7 @@ def render_context_with_metadata(
         token_budget=token_budget,
         compaction_profile=compaction_profile,
         max_sentences_per_bundle=max_sentences_per_bundle,
+        ace_renderer_variant=ace_renderer_variant,
     )
     rendered_stats=bundle_sentence_statistics(evidence_bundles,context)
     role_counts=rendered_context_role_counts(context)
@@ -1671,6 +1850,7 @@ def render_context_with_metadata(
         "support_sentence_count":rendered_support_sentence_count(context),
         "fallback_used":rendered_fallback_used(context),
         "compaction_profile":compact,
+        "ace_renderer_variant":str(ace_renderer_variant or "r0_current"),
         "max_sentences_per_bundle":int(max_sentences_per_bundle or 3),
     })
     return context,stats
@@ -1708,6 +1888,7 @@ def build_generation_prompt(question: str, bundles: Sequence[Mapping[str,Any]], 
         cfg.get("context_token_budget"),
         compaction_profile=str(cfg.get("compaction_profile") or "none"),
         max_sentences_per_bundle=int(cfg.get("max_sentences_per_bundle",3) or 3),
+        ace_renderer_variant=str(cfg.get("ace_renderer_variant") or "r0_current"),
     )
     return build_prompt(question, context, prompt_profile), prompt_profile, context, context_stats
 
