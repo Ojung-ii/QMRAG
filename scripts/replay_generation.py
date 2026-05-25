@@ -117,15 +117,17 @@ def find_latest_prediction_with_rendering(
 def prompt_experiment_type(source_prompt: str, target_prompt: str, rendering_changed: bool, context_truncation: bool = False, context_compaction: bool = False) -> str:
     if target_prompt == "strict_short_qa" and not context_compaction and not context_truncation and not rendering_changed:
         return "format_ablation"
-    if target_prompt in {"qmrag_compact_chain_qa", "qmrag_compact_chain_light"}:
+    if target_prompt in {"qmrag_compact_chain_qa", "qmrag_compact_chain_light", "qmrag_compact_chain_short_qa"}:
         return "compact_prompt_ablation"
+    if target_prompt in {"qmrag_bundle_qa", "qmrag_bundle_light", "qmrag_bundle_tiny", "qmrag_bundle_short_qa"}:
+        return "ablation"
     if context_compaction:
         return "context_compaction_replay"
     if context_truncation:
         return "context_budget_replay"
     if rendering_changed:
         return "rendering_replay"
-    if target_prompt != source_prompt or target_prompt in {"qmrag_bundle_qa", "qmrag_bundle_light", "qmrag_bundle_tiny"}:
+    if target_prompt != source_prompt:
         return "replay_ablation"
     return "replay"
 

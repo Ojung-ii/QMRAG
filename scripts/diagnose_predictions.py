@@ -76,6 +76,42 @@ def iter_prediction_files(output_root: Path) -> Iterable[Path]:
     yield from sorted(output_root.rglob("predictions.jsonl"))
 
 
+def first_jsonl_row(path: Path) -> Dict[str, Any] | None:
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line=line.strip()
+                if line:
+                    return json.loads(line)
+    except Exception:
+        return None
+    return None
+
+
+def summarize_for_latest(path: Path) -> Dict[str, Any] | None:
+    first=first_jsonl_row(path)
+    if not first:
+        return None
+    return {
+        "dataset": infer_dataset(path, [first]),
+        "prompt_profile": infer_prompt([first]),
+        "rendering_profile": infer_rendering([first]),
+        "retrieval_variant": infer_retrieval_variant([first]),
+        "seed_selection_variant": infer_seed_selection_variant([first]),
+        "mtime": path.stat().st_mtime,
+        "path": str(path),
+    }
+
+
+def latest_paths_by_dataset_prompt(rows: List[Dict[str, Any]]) -> List[Path]:
+    latest: Dict[Tuple[str, str, str, str, str], Dict[str, Any]]={}
+    for row in rows:
+        key=(str(row["dataset"]), str(row["prompt_profile"]), str(row["rendering_profile"]), str(row.get("retrieval_variant","full_hetero")), str(row.get("seed_selection_variant","medoid_current")))
+        if key not in latest or float(row["mtime"]) > float(latest[key]["mtime"]):
+            latest[key]=row
+    return [Path(x["path"]) for x in sorted(latest.values(), key=lambda r: (str(r["dataset"]), str(r["prompt_profile"]), str(r["rendering_profile"]), str(r.get("retrieval_variant","full_hetero")), str(r.get("seed_selection_variant","medoid_current"))))]
+
+
 def summarize(path: Path) -> Dict[str, Any]:
     rows=read_jsonl(path)
     dataset=infer_dataset(path, rows)
@@ -83,7 +119,12 @@ def summarize(path: Path) -> Dict[str, Any]:
     rendering_profile=infer_rendering(rows)
     retrieval_variant=infer_retrieval_variant(rows)
     seed_selection_variant=infer_seed_selection_variant(rows)
-    result=evaluate_predictions(rows, dataset=dataset, prompt_profile=prompt_profile)
+    eval_path=path.parent/"eval.json"
+    if eval_path.exists():
+        with eval_path.open("r", encoding="utf-8") as f:
+            result=json.load(f)
+    else:
+        result=evaluate_predictions(rows, dataset=dataset, prompt_profile=prompt_profile)
     raw_none=sum(1 for row in rows if row.get("raw_prediction") is None)
     denom=max(1,len(rows))
     return {
@@ -232,17 +273,27 @@ def main() -> None:
     args=parser.parse_args()
 
     output_root=Path(args.output_root)
-    rows=[]
-    for path in iter_prediction_files(output_root):
-        summary=summarize(path)
-        if args.dataset and summary["dataset"] != args.dataset:
-            continue
-        if not args.include_empty and int(summary.get("n") or 0)==0:
-            continue
-        rows.append(summary)
     if args.latest:
-        rows=latest_by_dataset_prompt(rows)
+        latest_infos=[]
+        for path in iter_prediction_files(output_root):
+            info=summarize_for_latest(path)
+            if not info:
+                continue
+            if args.dataset and info["dataset"] != args.dataset:
+                continue
+            latest_infos.append(info)
+        rows=[summarize(path) for path in latest_paths_by_dataset_prompt(latest_infos)]
+        if not args.include_empty:
+            rows=[row for row in rows if int(row.get("n") or 0)!=0]
     else:
+        rows=[]
+        for path in iter_prediction_files(output_root):
+            summary=summarize(path)
+            if args.dataset and summary["dataset"] != args.dataset:
+                continue
+            if not args.include_empty and int(summary.get("n") or 0)==0:
+                continue
+            rows.append(summary)
         rows=sorted(rows, key=lambda r: (str(r["dataset"]), str(r["prompt_profile"]), str(r["rendering_profile"]), str(r["path"])))
     print(markdown_table(rows))
 

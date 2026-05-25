@@ -36,6 +36,7 @@ COMPACTION_PROFILES = (
 )
 
 PROMPT_TEMPLATES = {
+    # Main fair-comparison prompt. Do not change for QMRAG/baseline comparisons.
     "common_qa": """You are a QA assistant.
 Answer the question using only the provided Context.
 When possible, use a concise answer explicitly supported by the Context.
@@ -48,6 +49,7 @@ Question: {question}
 Context:
 {context}
 Answer:""",
+    # Existing QMRAG structured_chain native/ablation prompt. Kept for reproducibility.
     "qmrag_bundle_qa": """You are a QA assistant for evidence-bundle based retrieval.
 Answer the question using only the provided Context.
 
@@ -65,6 +67,7 @@ Question: {question}
 Context:
 {context}
 Answer:""",
+    # Legacy ablation prompt; excluded from the new default runners.
     "qmrag_bundle_light": """You are a QA assistant.
 Answer the question using only the provided Context.
 The Context may contain Evidence Chains and Multi-Anchor Evidence.
@@ -79,6 +82,7 @@ Question: {question}
 Context:
 {context}
 Answer:""",
+    # Legacy ablation prompt; excluded from the new default runners.
     "qmrag_bundle_tiny": """You are a QA assistant.
 Use only the Context.
 If an Evidence Chain is given, follow Anchor → Bridge → answer evidence.
@@ -90,17 +94,76 @@ Question: {question}
 Context:
 {context}
 Answer:""",
-    "strict_short_qa": """You are a QA assistant.
-Use only the provided Context.
-Return exactly one short answer span.
+    "strict_short_qa": """---Role---
 
-Output rules:
-- Do not explain.
-- Do not output Markdown.
-- Do not output citations or references.
-- Do not output prefixes such as "Answer:" or "Final answer:".
-- For yes/no questions, output exactly yes or no in lowercase.
-- If the answer is not explicitly supported, output exactly: insufficient information
+You are an expert AI assistant specializing in answer extraction from a provided knowledge base.
+
+---Goal---
+
+Answer the user query using ONLY the provided Context.
+Return only the final short answer span.
+
+---Instructions---
+
+1. Grounding:
+  - Use only facts explicitly present in the Context.
+  - Do not use outside knowledge.
+  - If the answer cannot be found, output exactly: insufficient information
+
+2. Reasoning policy:
+  - Reason internally, but do not reveal chain-of-thought.
+  - Do not output intermediate analysis.
+
+3. Output format:
+  - Output exactly one line with only the final answer text.
+  - Do not output Markdown, bullets, headings, JSON, or code blocks.
+  - Do not output citations or a references section.
+  - Do not output prefixes such as "Answer:", "Final answer:", or "So the answer is:".
+  - For yes/no questions, output exactly `yes` or `no` in lowercase.
+
+4. Language:
+  - Use the same language as the user query unless the answer is a proper noun.
+
+Question: {question}
+Context:
+{context}
+Answer:""",
+    "qmrag_bundle_short_qa": """---Role---
+
+You are an expert QA assistant specializing in short answer extraction from evidence-chain context.
+
+---Goal---
+
+Answer the user query using ONLY the provided Context.
+Return only the final short answer span.
+
+---Instructions---
+
+1. Grounding:
+  - Use only facts explicitly present in the Context.
+  - Do not use outside knowledge.
+  - If the answer is not explicitly supported by the Context, output exactly: insufficient information
+
+2. Evidence-chain use:
+  - The Context may contain Evidence Chain, Multi-Anchor Evidence, and Supporting Evidence sections.
+  - For Evidence Chain, use the first sentence to connect the question anchor to the bridge entity.
+  - Then use the bridge/property sentence as the answer evidence when it satisfies the remaining question.
+  - For Multi-Anchor Evidence, compare only the listed anchors using the provided evidence.
+  - Use Supporting Evidence only when it confirms or completes the Evidence Chain.
+
+3. Reasoning policy:
+  - Reason internally, but do not reveal chain-of-thought.
+  - Do not output intermediate analysis.
+
+4. Output format:
+  - Output exactly one line with only the final answer text.
+  - Do not output Markdown, bullets, headings, JSON, or code blocks.
+  - Do not output citations or a references section.
+  - Do not output prefixes such as "Answer:", "Final answer:", or "So the answer is:".
+  - For yes/no questions, output exactly `yes` or `no` in lowercase.
+
+5. Language:
+  - Use the same language as the user query unless the answer is a proper noun.
 
 Question: {question}
 Context:
@@ -137,6 +200,37 @@ For Multi-Anchor Evidence, compare only the listed anchors.
 
 Return only the final short answer.
 If unsupported, output exactly: insufficient information
+
+Question: {question}
+Context:
+{context}
+Answer:""",
+    "qmrag_compact_chain_short_qa": """---Role---
+
+You are an expert QA assistant specializing in short answer extraction from compact evidence chains.
+
+---Goal---
+
+Answer the user query using ONLY the provided Context.
+Return only the final short answer span.
+
+---Instructions---
+
+1. Grounding:
+  - Use only facts explicitly present in the Context.
+  - Do not use outside knowledge.
+  - If the answer is not explicitly supported by the Context, output exactly: insufficient information
+
+2. Compact chain use:
+  - Each Evidence Chain represents: question anchor -> bridge entity -> answer evidence.
+  - Use the first sentence to link the question anchor to the bridge entity.
+  - Use the next sentence as the answer evidence about that bridge entity.
+  - For Multi-Anchor Evidence, compare only the listed anchors.
+
+3. Output format:
+  - Output exactly one line with only the final answer text.
+  - Do not output Markdown, bullets, headings, JSON, citations, references, or prefixes.
+  - For yes/no questions, output exactly `yes` or `no` in lowercase.
 
 Question: {question}
 Context:
