@@ -1,16 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-LIMIT="${1:-100}"
-MODE="${2:-default}"
-if [[ "$LIMIT" == --* ]]; then
-  MODE="$LIMIT"
-  LIMIT=100
-fi
-if [[ "$MODE" != "default" && "$MODE" != "--recommended-only" && "$MODE" != "--include-all" ]]; then
-  echo "Usage: bash scripts/run_common_compact_short_prompt_5proc.sh [limit] [--recommended-only|--include-all]" >&2
-  exit 2
-fi
+LIMIT=100
+MODE="--recommended-only"
+INCLUDE_NATIVE_COMPACT=0
+for arg in "$@"; do
+  case "$arg" in
+    --recommended-only|--include-all)
+      MODE="$arg"
+      ;;
+    --include-native-compact)
+      INCLUDE_NATIVE_COMPACT=1
+      ;;
+    ''|*[!0-9]*)
+      echo "Usage: bash scripts/run_common_compact_short_prompt_5proc.sh [limit] [--recommended-only|--include-all] [--include-native-compact]" >&2
+      exit 2
+      ;;
+    *)
+      LIMIT="$arg"
+      ;;
+  esac
+done
 
 export VLLM_BASE_URL="${VLLM_BASE_URL:-http://localhost:8013/v1}"
 export VLLM_API_KEY="${VLLM_API_KEY:-EMPTY}"
@@ -27,7 +37,7 @@ mkdir -p "$LOG_DIR"
 : > "$FAILED_TSV"
 : > "$PROFILE_STATUS_TSV"
 
-echo "[START] ${RUN_TS} limit=${LIMIT} mode=${MODE}" | tee -a "$MASTER_LOG"
+echo "[START] ${RUN_TS} limit=${LIMIT} mode=${MODE} include_native_compact=${INCLUDE_NATIVE_COMPACT}" | tee -a "$MASTER_LOG"
 echo "[ENV] VLLM_BASE_URL=${VLLM_BASE_URL} MAX_PARALLEL_JOBS=${MAX_PARALLEL_JOBS}" | tee -a "$MASTER_LOG"
 
 python - <<'PY' | tee -a "$MASTER_LOG"
@@ -74,21 +84,22 @@ for dataset in datasets:
     print(f"source_ok dataset={dataset} n={len(rows)} path={path}")
 PY
 
-python - "$MODE" "$LIMIT" "$MAX_PARALLEL_JOBS" "$JOBS_TSV" "$PROFILE_STATUS_TSV" <<'PY'
+python - "$MODE" "$LIMIT" "$MAX_PARALLEL_JOBS" "$JOBS_TSV" "$PROFILE_STATUS_TSV" "$INCLUDE_NATIVE_COMPACT" <<'PY'
 import sys
 from pathlib import Path
 
 from utils.generation import COMPACTION_PROFILES
 
-mode, limit, slots, jobs_path, profile_status_path = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), Path(sys.argv[4]), Path(sys.argv[5])
+mode, limit, slots, jobs_path, profile_status_path, include_native = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), Path(sys.argv[4]), Path(sys.argv[5]), bool(int(sys.argv[6]))
 datasets = ["hotpotqa", "2wiki", "popqa", "musique"]
-default_groups = [
+recommended_groups = [
     ("none", "strict_short_qa", "full_strict_short"),
     ("none", "qmrag_bundle_short_qa", "full_bundle_short"),
     ("metadata_only_compact", "common_qa", "common_compact"),
     ("chain_dedup", "common_qa", "common_compact"),
     ("top3_chain_dedup", "common_qa", "common_compact"),
-    ("metadata_only_compact", "qmrag_bundle_short_qa", "native_compact"),
+]
+native_compact_groups = [
     ("chain_dedup", "qmrag_bundle_short_qa", "native_compact"),
     ("top3_chain_dedup", "qmrag_compact_chain_short_qa", "native_compact"),
 ]
@@ -125,7 +136,12 @@ with profile_status_path.open("w", encoding="utf-8") as handle:
         status = "implemented" if actual in supported else "not implemented"
         handle.write(f"{requested}\t{actual}\t{status}\n")
 
-groups = all_groups if mode == "--include-all" else default_groups
+if mode == "--include-all":
+    groups = all_groups
+elif include_native:
+    groups = recommended_groups + native_compact_groups
+else:
+    groups = recommended_groups
 jobs = []
 for profile, prompt, group_mode in groups:
     actual_profile = profile_aliases.get(profile, profile)

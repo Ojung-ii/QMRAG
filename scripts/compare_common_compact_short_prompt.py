@@ -317,6 +317,17 @@ def metric_row(
     input_tok = float(ev.get("avg_input_prompt_tokens", 0.0) or 0.0)
     delta_common = f1 - float(common_eval.get("f1", 0.0) or 0.0) if common_eval else None
     delta_bundle = f1 - float(bundle_eval.get("f1", 0.0) or 0.0) if bundle_eval else None
+    source_retrieval_ms = float(ev.get("retrieval_latency_ms", 0.0) or 0.0)
+    generation_ms = float(ev.get("generation_latency_ms", 0.0) or 0.0)
+    full_common_generation_ms = float(common_eval.get("generation_latency_ms", 0.0) or 0.0) if common_eval else generation_ms
+    effective_total_ms = source_retrieval_ms + generation_ms
+    full_common_effective_total_ms = source_retrieval_ms + full_common_generation_ms
+    native_prompt_success = (
+        (prompt == "strict_short_qa" and compaction == "none" and delta_common is not None and delta_common >= 0.0)
+        or (prompt == "qmrag_bundle_short_qa" and compaction == "none" and delta_bundle is not None and delta_bundle >= 0.0)
+    )
+    common_success = prompt == "common_qa" and compaction != "none" and f1 > float(baseline["f1"]) and input_tok <= 1000.0
+    aggressive_success = prompt == "common_qa" and compaction != "none" and f1 > float(baseline["f1"]) and input_tok <= 800.0
     row = {
         "dataset": dataset,
         "mode": reference_kind or row_mode(prompt, compaction),
@@ -340,9 +351,13 @@ def metric_row(
         "token_reduction_rate": ev.get("token_reduction_rate", 0.0) if compaction != "none" else 0.0,
         "F1_per_1k_context_tokens": ev.get("F1_per_1k_context_tokens", 0.0),
         "F1_per_1k_input_tokens": ev.get("F1_per_1k_input_prompt_tokens", 0.0),
+        "source_retrieval_ms": source_retrieval_ms,
         "retrieval_ms": ev.get("retrieval_latency_ms", 0.0),
-        "generation_ms": ev.get("generation_latency_ms", 0.0),
+        "generation_ms": generation_ms,
         "total_ms": ev.get("latency_ms", 0.0),
+        "effective_total_ms": effective_total_ms,
+        "generation_ms_reduction_vs_full_common": full_common_generation_ms - generation_ms,
+        "total_ms_reduction_vs_full_common_est": full_common_effective_total_ms - effective_total_ms,
         "avg_prediction_tokens": fmt.get("avg_prediction_tokens", 0.0),
         "long_answer_rate": fmt.get("long_answer_rate", 0.0),
         "prefix_rate": fmt.get("prefix_rate", 0.0),
@@ -356,9 +371,12 @@ def metric_row(
         "broken_by_right": counts["broken_by_right"],
         "both_correct": counts["both_correct"],
         "both_wrong": counts["both_wrong"],
-        "common_compact_success": prompt == "common_qa" and compaction != "none" and f1 > float(baseline["f1"]) and input_tok <= 1000.0,
-        "aggressive_common_compact_success": prompt == "common_qa" and compaction != "none" and f1 > float(baseline["f1"]) and input_tok <= 800.0,
+        "common_compact_success": common_success,
+        "aggressive_common_compact_success": aggressive_success,
         "native_compact_success": prompt != "common_qa" and compaction != "none" and input_tok <= 1000.0 and delta_bundle is not None and delta_bundle >= -0.06,
+        "native_prompt_success": native_prompt_success,
+        "qmrag_compact_paper_candidate": common_success or aggressive_success,
+        "qmrang_compact_paper_candidate": common_success or aggressive_success,
         "strict_prompt_helpful": False,
         "path": str(path) if path else None,
     }
@@ -391,8 +409,12 @@ def baseline_row(dataset: str) -> dict[str, Any]:
         "F1_per_1k_context_tokens": None,
         "F1_per_1k_input_tokens": None,
         "retrieval_ms": None,
+        "source_retrieval_ms": None,
         "generation_ms": None,
         "total_ms": None,
+        "effective_total_ms": None,
+        "generation_ms_reduction_vs_full_common": None,
+        "total_ms_reduction_vs_full_common_est": None,
         "avg_prediction_tokens": None,
         "long_answer_rate": None,
         "prefix_rate": None,
@@ -407,6 +429,9 @@ def baseline_row(dataset: str) -> dict[str, Any]:
         "common_compact_success": False,
         "aggressive_common_compact_success": False,
         "native_compact_success": False,
+        "native_prompt_success": False,
+        "qmrag_compact_paper_candidate": False,
+        "qmrang_compact_paper_candidate": False,
         "strict_prompt_helpful": False,
         "path": None,
     }
@@ -425,8 +450,11 @@ def build_dataset_summary(root: Path, dataset: str) -> dict[str, Any]:
     ]
     if full_bundle_rows:
         rows.append(metric_row(dataset, full_bundle_path, full_bundle_rows, full_common_rows, full_bundle_rows, "qmrag_bundle_qa", "none", "full_bundle"))
-    for path in find_latest_replays(root, dataset):
-        replay_rows = read_jsonl(path)
+    replay_payloads = [(path, read_jsonl(path)) for path in find_latest_replays(root, dataset)]
+    max_replay_n = max((len(replay_rows) for _, replay_rows in replay_payloads), default=0)
+    if max_replay_n >= 1000:
+        replay_payloads = [(path, replay_rows) for path, replay_rows in replay_payloads if len(replay_rows) >= 1000]
+    for path, replay_rows in replay_payloads:
         first = replay_rows[0] if replay_rows else {}
         prompt = str(first.get("prompt_profile") or "UNKNOWN")
         compaction = row_compaction(first)
@@ -436,10 +464,13 @@ def build_dataset_summary(root: Path, dataset: str) -> dict[str, Any]:
     full_strict = next((row for row in rows if row["mode"] == "full_strict_short"), None)
     if full_strict:
         full_strict["strict_prompt_helpful"] = float(full_strict.get("F1", 0.0) or 0.0) > full_common_f1
+        full_strict["native_prompt_success"] = bool(full_strict.get("strict_prompt_helpful"))
     full_bundle = next((row for row in rows if row["mode"] == "full_bundle"), None)
     full_bundle_short = next((row for row in rows if row["mode"] == "full_bundle_short"), None)
     common_success = [row for row in rows if row.get("common_compact_success")]
+    aggressive_success = [row for row in rows if row.get("aggressive_common_compact_success")]
     native_success = [row for row in rows if row.get("native_compact_success")]
+    native_prompt_success = [row for row in rows if row.get("native_prompt_success")]
     return {
         "dataset": dataset,
         "full_common_path": str(full_common_path),
@@ -450,9 +481,12 @@ def build_dataset_summary(root: Path, dataset: str) -> dict[str, Any]:
             "strict_short_qa_beats_common_qa": bool(full_strict and full_strict.get("strict_prompt_helpful")),
             "qmrag_bundle_short_qa_beats_qmrag_bundle_qa": bool(full_bundle and full_bundle_short and float(full_bundle_short["F1"]) > float(full_bundle["F1"])),
             "common_prompt_compact_beats_best_baseline": bool(common_success),
+            "aggressive_common_prompt_compact_beats_best_baseline": bool(aggressive_success),
             "native_compact_recovers_performance": bool(native_success),
             "paper_candidate_profiles": [row["compaction_profile"] for row in common_success],
+            "aggressive_paper_candidate_profiles": [row["compaction_profile"] for row in aggressive_success],
             "native_candidate_profiles": [f"{row['compaction_profile']}:{row['prompt_profile']}" for row in native_success],
+            "native_prompt_success_profiles": [row["prompt_profile"] for row in native_prompt_success],
         },
     }
 
@@ -490,9 +524,11 @@ def markdown(summaries: Sequence[Mapping[str, Any]]) -> str:
         "TokenDown",
         "F1/1kCtx",
         "F1/1kInput",
-        "retr_ms",
+        "src_retr_ms",
         "gen_ms",
-        "total_ms",
+        "eff_total_ms",
+        "gen_down",
+        "eff_total_down",
         "avg_pred_tok",
         "long_ans",
         "prefix",
@@ -505,12 +541,28 @@ def markdown(summaries: Sequence[Mapping[str, Any]]) -> str:
         "fixed",
         "broken",
         "common_success",
+        "aggr_success",
+        "native_prompt_success",
         "native_success",
         "strict_helpful",
+        "paper_candidate",
     ]
     lines = ["# Common Compact Short Prompt Summary", ""]
     for summary in summaries:
         interp = summary.get("interpretation", {})
+        common_candidates = [row for row in summary.get("rows", []) if row.get("common_compact_success")]
+        strict_row = next((row for row in summary.get("rows", []) if row.get("mode") == "full_strict_short"), None)
+        bundle_short_row = next((row for row in summary.get("rows", []) if row.get("mode") == "full_bundle_short"), None)
+        candidate_names = ", ".join(row["compaction_profile"] for row in common_candidates) or "none"
+        candidate_margins = ", ".join(
+            f"{row['compaction_profile']}={float(row['margin_vs_best_baseline']):.4f}" for row in common_candidates
+        ) or "none"
+        candidate_token_down = ", ".join(
+            f"{row['compaction_profile']}={float(row['token_reduction_rate']):.4f}" for row in common_candidates
+        ) or "none"
+        candidate_f1_per_input = ", ".join(
+            f"{row['compaction_profile']}={float(row['F1_per_1k_input_tokens']):.4f}" for row in common_candidates
+        ) or "none"
         lines.extend(
             [
                 f"## {summary['dataset']}",
@@ -524,8 +576,22 @@ def markdown(summaries: Sequence[Mapping[str, Any]]) -> str:
                 f"1. strict_short_qa better than common_qa: {fmt(interp.get('strict_short_qa_beats_common_qa'))}",
                 f"2. qmrag_bundle_short_qa better than qmrag_bundle_qa: {fmt(interp.get('qmrag_bundle_short_qa_beats_qmrag_bundle_qa'))}",
                 f"3. common prompt compact beats best baseline: {fmt(interp.get('common_prompt_compact_beats_best_baseline'))}",
-                f"4. native compact prompt recovers compact performance: {fmt(interp.get('native_compact_recovers_performance'))}",
-                f"5. QMRAG-Compact paper candidates: {', '.join(interp.get('paper_candidate_profiles') or []) or 'none'}",
+                f"4. aggressive compact beats best baseline: {fmt(interp.get('aggressive_common_prompt_compact_beats_best_baseline'))}",
+                f"5. native compact prompt recovers compact performance: {fmt(interp.get('native_compact_recovers_performance'))}",
+                f"6. QMRAG-Compact paper candidates: {', '.join(interp.get('paper_candidate_profiles') or []) or 'none'}",
+                f"7. Aggressive candidates: {', '.join(interp.get('aggressive_paper_candidate_profiles') or []) or 'none'}",
+                f"8. Native prompt successes: {', '.join(interp.get('native_prompt_success_profiles') or []) or 'none'}",
+                "",
+                "### N1000 Decision Notes",
+                "",
+                f"- QMRAG-Compact-common candidates: {candidate_names}",
+                f"- Best-baseline margins: {candidate_margins}",
+                f"- Token reduction: {candidate_token_down}",
+                f"- F1/1K input: {candidate_f1_per_input}",
+                f"- strict_short_qa effect: {fmt(strict_row.get('delta_F1_vs_full_common') if strict_row else None)}",
+                f"- qmrag_bundle_short_qa effect: {fmt(bundle_short_row.get('delta_F1_vs_full_bundle') if bundle_short_row else None)}",
+                "- Method/native prompt results should remain appendix unless the effect is consistently positive across datasets.",
+                "- Failed profiles are those with negative margin, InputTok > 1000 for common compact, or increased insufficient/evidence loss.",
                 "",
                 "| " + " | ".join(headers) + " |",
                 "| " + " | ".join(["---"] * len(headers)) + " |",
@@ -557,9 +623,11 @@ def markdown(summaries: Sequence[Mapping[str, Any]]) -> str:
                         fmt(row.get("token_reduction_rate")),
                         fmt(row.get("F1_per_1k_context_tokens")),
                         fmt(row.get("F1_per_1k_input_tokens")),
-                        fmt(row.get("retrieval_ms")),
+                        fmt(row.get("source_retrieval_ms")),
                         fmt(row.get("generation_ms")),
-                        fmt(row.get("total_ms")),
+                        fmt(row.get("effective_total_ms")),
+                        fmt(row.get("generation_ms_reduction_vs_full_common")),
+                        fmt(row.get("total_ms_reduction_vs_full_common_est")),
                         fmt(row.get("avg_prediction_tokens")),
                         fmt(row.get("long_answer_rate")),
                         fmt(row.get("prefix_rate")),
@@ -572,8 +640,11 @@ def markdown(summaries: Sequence[Mapping[str, Any]]) -> str:
                         fmt(row.get("fixed_by_right")),
                         fmt(row.get("broken_by_right")),
                         fmt(row.get("common_compact_success")),
+                        fmt(row.get("aggressive_common_compact_success")),
+                        fmt(row.get("native_prompt_success")),
                         fmt(row.get("native_compact_success")),
                         fmt(row.get("strict_prompt_helpful")),
+                        fmt(row.get("qmrag_compact_paper_candidate")),
                     ]
                 )
                 + " |"
@@ -597,8 +668,10 @@ def main() -> None:
     summaries = [build_dataset_summary(Path(args.output_root), dataset) for dataset in datasets]
     result = {"summaries": summaries}
     dump_json(result, analysis_dir / "common_compact_short_prompt_summary.json")
+    dump_json(result, analysis_dir / "common_compact_short_prompt_n1000_summary.json")
     md = markdown(summaries)
     (analysis_dir / "common_compact_short_prompt_summary.md").write_text(md + "\n", encoding="utf-8")
+    (analysis_dir / "common_compact_short_prompt_n1000_summary.md").write_text(md + "\n", encoding="utf-8")
     print(md)
     print(f"wrote: {analysis_dir}")
 
