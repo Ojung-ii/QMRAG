@@ -234,6 +234,10 @@ def prompt_experiment_type(prompt_profile: str, rendering_profile: str | None = 
         return "main_comparison"
     if prompt_profile in {"qmrag_bundle_qa","qmrag_bundle_light","qmrag_bundle_tiny"}:
         return "ablation"
+    if prompt_profile=="strict_short_qa":
+        return "format_ablation"
+    if prompt_profile in {"qmrag_compact_chain_qa","qmrag_compact_chain_light"}:
+        return "compact_prompt_ablation"
     return "unknown"
 
 def log_retrieval_summary(preds: list[Mapping[str,Any]], logger: ExperimentLogger) -> None:

@@ -58,6 +58,25 @@ def context_from_row(row: Mapping[str, Any]) -> str:
 def json_hash(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
+def first_jsonl_row(path: Path) -> dict[str, Any] | None:
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                if line.strip():
+                    return json.loads(line)
+    except Exception:
+        return None
+    return None
+
+def source_preference(first: Mapping[str, Any]) -> int:
+    ablation=str(first.get("ablation_variant") or "")
+    residual=str((first.get("retrieval_diagnostics",{}) or {}).get("residual_selection_variant") or first.get("residual_selection_variant") or "")
+    if ablation in {"", "core_qmrag_mainline"} and residual in {"", "residual_lexical"}:
+        return 2
+    if ablation in {"", "core_qmrag_mainline"}:
+        return 1
+    return 0
+
 
 def find_latest_prediction_with_rendering(
     output_root: Path,
@@ -68,23 +87,19 @@ def find_latest_prediction_with_rendering(
 ) -> Path:
     candidates = []
     for path in iter_prediction_files(output_root):
-        try:
-            summary = summarize_prediction_file(path)
-        except Exception:
+        first = first_jsonl_row(path)
+        if not first:
             continue
-        if dataset and summary["dataset"] != dataset:
+        row_dataset = str(first.get("dataset") or infer_dataset(path, [first]))
+        row_prompt = str(first.get("prompt_profile") or "")
+        row_rendering = str(first.get("rendering_profile") or "structured_chain")
+        if dataset and row_dataset != dataset:
             continue
-        if prompt_profile and summary["prompt_profile"] != prompt_profile:
+        if prompt_profile and row_prompt != prompt_profile:
             continue
-        if rendering_profile and summary["rendering_profile"] != rendering_profile:
-            continue
-        if int(summary["n"]) <= 0:
+        if rendering_profile and row_rendering != rendering_profile:
             continue
         if exclude_context_truncation:
-            try:
-                first = read_jsonl(path)[0]
-            except Exception:
-                first = {}
             if (
                 first.get("context_truncation_enabled")
                 or first.get("top_bundles") is not None
@@ -92,14 +107,18 @@ def find_latest_prediction_with_rendering(
                 or str(first.get("compaction_profile") or "none") != "none"
             ):
                 continue
-        candidates.append(summary)
+        candidates.append({"path": path, "mtime": path.stat().st_mtime, "source_preference": source_preference(first)})
     if not candidates:
         filters = f"dataset={dataset!r} prompt_profile={prompt_profile!r} rendering_profile={rendering_profile!r}"
         raise SystemExit(f"No matching predictions.jsonl found for {filters}")
-    return max(candidates, key=lambda x: (float(x["mtime"]), str(x["path"])))["path"]
+    return max(candidates, key=lambda x: (int(x.get("source_preference",0)), float(x["mtime"]), str(x["path"])))["path"]
 
 
 def prompt_experiment_type(source_prompt: str, target_prompt: str, rendering_changed: bool, context_truncation: bool = False, context_compaction: bool = False) -> str:
+    if target_prompt == "strict_short_qa" and not context_compaction and not context_truncation and not rendering_changed:
+        return "format_ablation"
+    if target_prompt in {"qmrag_compact_chain_qa", "qmrag_compact_chain_light"}:
+        return "compact_prompt_ablation"
     if context_compaction:
         return "context_compaction_replay"
     if context_truncation:
@@ -369,6 +388,10 @@ def replay_rows(
         new_row["compaction_token_reduction_rate"] = 1.0 - float(new_row.get("rendered_context_tokens", 0.0) or 0.0) / max(1e-9, source_context_token_value) if source_context_token_value > 0 else 0.0
         new_row["rendered_sentence_count"] = int(compaction_stats.get("rendered_sentence_count", 0) or 0)
         new_row["avg_rendered_sentences_per_bundle"] = float(compaction_stats.get("avg_sentences_per_bundle", 0.0) or 0.0)
+        new_row["rendered_chain_count"] = int(compaction_stats.get("rendered_chain_count", 0) or 0)
+        new_row["support_sentence_count"] = int(compaction_stats.get("support_sentence_count", 0) or 0)
+        new_row["fallback_used"] = bool(compaction_stats.get("fallback_used", False))
+        new_row["fallback_rate"] = 1.0 if new_row["fallback_used"] else 0.0
         new_row["dropped_sentence_count"] = int(compaction_stats.get("dropped_sentence_count", 0) or 0)
         new_row["duplicate_removed_count"] = int(compaction_stats.get("duplicate_removed_count", 0) or 0)
         new_row["source_removed_count"] = int(compaction_stats.get("source_removed_count", 0) or 0)
@@ -518,6 +541,9 @@ def main() -> None:
             "token_reduction_rate": sum(float(x.get("token_reduction_rate", 0.0) or 0.0) for x in replayed) / max(1, len(replayed)),
             "avg_rendered_sentence_count": sum(float(x.get("rendered_sentence_count", 0.0) or 0.0) for x in replayed) / max(1, len(replayed)),
             "avg_sentences_per_bundle": sum(float(x.get("avg_rendered_sentences_per_bundle", 0.0) or 0.0) for x in replayed) / max(1, len(replayed)),
+            "avg_rendered_chain_count": sum(float(x.get("rendered_chain_count", 0.0) or 0.0) for x in replayed) / max(1, len(replayed)),
+            "avg_support_sentence_count": sum(float(x.get("support_sentence_count", 0.0) or 0.0) for x in replayed) / max(1, len(replayed)),
+            "fallback_rate": sum(float(1.0 if x.get("fallback_used") else 0.0) for x in replayed) / max(1, len(replayed)),
             "avg_dropped_sentence_count": sum(float(x.get("dropped_sentence_count", 0.0) or 0.0) for x in replayed) / max(1, len(replayed)),
             "avg_duplicate_removed_count": sum(float(x.get("duplicate_removed_count", 0.0) or 0.0) for x in replayed) / max(1, len(replayed)),
             "avg_source_removed_count": sum(float(x.get("source_removed_count", 0.0) or 0.0) for x in replayed) / max(1, len(replayed)),
@@ -561,6 +587,9 @@ def main() -> None:
                 "token_reduction_rate": result.get("token_reduction_rate"),
                 "avg_rendered_sentence_count": result.get("avg_rendered_sentence_count"),
                 "avg_sentences_per_bundle": result.get("avg_sentences_per_bundle"),
+                "avg_rendered_chain_count": result.get("avg_rendered_chain_count"),
+                "avg_support_sentence_count": result.get("avg_support_sentence_count"),
+                "fallback_rate": result.get("fallback_rate"),
                 "avg_dropped_sentence_count": result.get("avg_dropped_sentence_count"),
                 "avg_duplicate_removed_count": result.get("avg_duplicate_removed_count"),
                 "avg_source_removed_count": result.get("avg_source_removed_count"),
