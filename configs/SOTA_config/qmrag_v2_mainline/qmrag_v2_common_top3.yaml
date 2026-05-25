@@ -9,12 +9,16 @@ generation:
     fallback_to_estimate: true
 
 sota_config:
-  role: compact_efficiency_common_top3
-  prompt_experiment_type: compact_ablation
-  context: top_bundles
+  role: paper_compact_common_top3_chain_dedup
+  prompt_experiment_type: compact_efficiency
+  context: compact_replay
   top_bundles: 3
+  compaction_profile: top3_chain_dedup
   context_token_budget: null
+  mainline_status: paper_compact_candidate
   notes:
-    - Unified compact efficiency ablation across datasets.
-    - Implement with replay_generation.py --top-bundles 3 to avoid rerunning retrieval.
-    - This is not the main default.
+    - Paper-facing QMRAG-Compact-common efficiency profile.
+    - Uses the same evidence_bundles as full common mainline; only rendered_context is compacted.
+    - Implement with replay_generation.py --compaction-profile top3_chain_dedup to avoid rerunning retrieval.
+    - Outperforms the best common-prompt baseline on all four n=1000 datasets with InputTok <= 800.
+    - This is not the primary fair-comparison mainline; full common remains the main result.

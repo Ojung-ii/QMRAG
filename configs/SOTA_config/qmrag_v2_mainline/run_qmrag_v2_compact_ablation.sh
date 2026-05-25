@@ -5,7 +5,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 DATASETS=(hotpotqa 2wiki popqa musique)
 LIMIT="${LIMIT:-1000}"
+COMPACTION_PROFILE="${COMPACTION_PROFILE:-top3_chain_dedup}"
+TARGET_PROMPTS_TEXT="${TARGET_PROMPTS:-common_qa}"
 DRY_RUN=false
+read -r -a TARGET_PROMPTS_ARRAY <<< "${TARGET_PROMPTS_TEXT}"
 
 if [[ "${1:-}" == "--dry-run" ]]; then
   DRY_RUN=true
@@ -18,11 +21,11 @@ fi
 
 cd "${ROOT_DIR}"
 
-echo "[QMRAG v2 compact ablation] Uses replay_generation.py with --top-bundles 3."
+echo "[QMRAG v2 compact ablation] Uses replay_generation.py with --compaction-profile ${COMPACTION_PROFILE}."
 echo "[QMRAG v2 compact ablation] Retrieval is not rerun; require evidence_bundles_hash_match_rate=1.0."
 
 for dataset in "${DATASETS[@]}"; do
-  for target_prompt in common_qa qmrag_bundle_qa; do
+  for target_prompt in "${TARGET_PROMPTS_ARRAY[@]}"; do
     cmd=(
       python scripts/replay_generation.py
       --dataset "${dataset}"
@@ -31,7 +34,7 @@ for dataset in "${DATASETS[@]}"; do
       --target-prompt "${target_prompt}"
       --latest
       --limit "${LIMIT}"
-      --top-bundles 3
+      --compaction-profile "${COMPACTION_PROFILE}"
     )
     echo "[QMRAG v2 compact ${dataset} ${target_prompt}] ${cmd[*]}"
     if [[ "${DRY_RUN}" == "false" ]]; then

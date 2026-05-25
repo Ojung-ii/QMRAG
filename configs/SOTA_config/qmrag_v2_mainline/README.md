@@ -19,6 +19,9 @@ Main result uses `common_qa` + `structured_chain` + full context.
 - `top_bundles`: unset
 - `context_token_budget`: unset
 
+This remains the primary fair-comparison mainline. The compact result is a
+paper-facing efficiency setting, not a replacement for the main SOTA row.
+
 Run:
 
 ```bash
@@ -36,10 +39,21 @@ bash configs/SOTA_config/qmrag_v2_mainline/run_qmrag_v2_prompt_ablation.sh
 
 ## Compact Efficiency Ablation
 
-Unified compact setting uses `top_bundles=3` across all datasets. This is not the main default. The script uses `replay_generation.py` so retrieval is not rerun and `evidence_bundles_hash_match_rate` should remain `1.0`.
+The paper-facing compact setting is `top3_chain_dedup + common_qa` across all
+datasets. This is the recommended QMRAG-Compact-common result because the n=1000
+run beats the best common-prompt baseline on all four datasets while keeping
+`InputTok <= 800`. It is not the primary fair-comparison mainline. The script
+uses `replay_generation.py` so retrieval is not rerun and
+`evidence_bundles_hash_match_rate` should remain `1.0`.
 
 ```bash
 bash configs/SOTA_config/qmrag_v2_mainline/run_qmrag_v2_compact_ablation.sh
+```
+
+Optional compact prompt ablations can be replayed by overriding the prompt list:
+
+```bash
+TARGET_PROMPTS="common_qa qmrag_bundle_qa" bash configs/SOTA_config/qmrag_v2_mainline/run_qmrag_v2_compact_ablation.sh
 ```
 
 ## Runtime Ablation
@@ -90,6 +104,8 @@ Replay ablations write under `outputs/replay/{timestamp}/{dataset}/...`.
 
 - Do not change `common_qa` for main fair-comparison runs.
 - Do not use QMRAG-bundle as the main fair-comparison result.
+- Do not replace the primary full-context mainline with compact results in the
+  main SOTA table; report QMRAG-Compact-common as an efficiency result.
 - Do not use dataset-specific caps or context settings.
 - Do not commit `outputs/`, `data/`, `cache/`, `logs/`, zip files, pyc files, or `__pycache__/`.
 - Do not add full KG/OpenIE/PPR/keyword embedding features to this config pack.

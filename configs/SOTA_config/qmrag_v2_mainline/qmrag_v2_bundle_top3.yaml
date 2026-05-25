@@ -11,10 +11,12 @@ generation:
 sota_config:
   role: compact_efficiency_bundle_top3
   prompt_experiment_type: compact_ablation
-  context: top_bundles
+  context: compact_replay
   top_bundles: 3
+  compaction_profile: top3_chain_dedup
   context_token_budget: null
   notes:
-    - Same compact top-3 context as common_top3, with the QMRAG-bundle prompt.
-    - Implement with replay_generation.py --top-bundles 3 to avoid rerunning retrieval.
-    - This is not the main default.
+    - Same top3_chain_dedup compact context as common_top3, with the QMRAG-bundle prompt.
+    - Optional prompt ablation only; the paper-facing compact result uses common_qa.
+    - Implement with replay_generation.py --compaction-profile top3_chain_dedup to avoid rerunning retrieval.
+    - This is not the primary fair-comparison mainline.
