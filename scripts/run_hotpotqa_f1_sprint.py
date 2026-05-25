@@ -46,6 +46,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input-predictions-jsonl", required=True)
     parser.add_argument("--dataset", default="hotpotqa")
     parser.add_argument("--prompt-variants", nargs="+", default=list(DEFAULT_PROMPTS), choices=ACE_NATIVE_PROMPT_VARIANTS)
+    parser.add_argument(
+        "--prompt-profiles",
+        nargs="+",
+        default=None,
+        help="Optional generic prompt profiles such as common_qa. When set, this overrides --prompt-variants.",
+    )
     parser.add_argument("--renderer-variant", default="r0_current")
     parser.add_argument("--top-k", type=int, default=8)
     parser.add_argument("--generation-only", action="store_true", default=True)
@@ -179,13 +185,15 @@ async def run_sprint(args: argparse.Namespace) -> Path:
 
     semaphore = asyncio.Semaphore(max(1, args.max_concurrency))
     completed = 0
-    total = len(source_rows) * len(args.prompt_variants)
-    rows_by_variant: dict[str, list[dict[str, Any]]] = {variant: [] for variant in args.prompt_variants}
+    prompt_jobs = list(args.prompt_profiles or args.prompt_variants)
+    generic_prompt_mode = bool(args.prompt_profiles)
+    total = len(source_rows) * len(prompt_jobs)
+    rows_by_variant: dict[str, list[dict[str, Any]]] = {variant: [] for variant in prompt_jobs}
     lock = asyncio.Lock()
 
     async def worker(task_index: int, variant: str, row_index: int, row: Mapping[str, Any]) -> None:
         nonlocal completed
-        prompt_profile = resolve_ace_native_prompt_profile(variant)
+        prompt_profile = variant if generic_prompt_mode else resolve_ace_native_prompt_profile(variant)
         question = str(row.get(args.question_field) or "")
         context = str(row.get(args.context_field) or "")
         prompt = build_prompt(question, context, prompt_profile)
@@ -211,12 +219,12 @@ async def run_sprint(args: argparse.Namespace) -> Path:
                 "raw_prediction": processed,
                 "prediction": processed,
                 "prompt_profile": prompt_profile,
-                "ace_native_prompt_variant": variant,
+                "ace_native_prompt_variant": "" if generic_prompt_mode else variant,
                 "ace_renderer_variant": args.renderer_variant,
                 "top_k": args.top_k,
                 "top_bundles": args.top_k,
                 "generation_only": True,
-                "prompt_experiment_type": "hotpotqa_f1_sprint_generation_only",
+                "prompt_experiment_type": "generic_generation_only" if generic_prompt_mode else "hotpotqa_f1_sprint_generation_only",
                 "prompt": prompt,
                 "final_prompt_text": prompt,
                 "prompt_hash": __import__("hashlib").sha256(prompt.encode("utf-8")).hexdigest(),
@@ -250,7 +258,7 @@ async def run_sprint(args: argparse.Namespace) -> Path:
 
     tasks = []
     task_index = 0
-    for variant in args.prompt_variants:
+    for variant in prompt_jobs:
         for row_index, row in enumerate(source_rows):
             tasks.append(asyncio.create_task(worker(task_index, variant, row_index, row)))
             task_index += 1
@@ -262,6 +270,7 @@ async def run_sprint(args: argparse.Namespace) -> Path:
         "stage_root": str(stage_root),
         "dataset": args.dataset,
         "prompt_variants": list(args.prompt_variants),
+        "prompt_profiles": list(args.prompt_profiles or []),
         "renderer_variant": args.renderer_variant,
         "top_k": args.top_k,
         "n": len(source_rows),
@@ -283,13 +292,14 @@ async def run_sprint(args: argparse.Namespace) -> Path:
         out_dir = stage_root / variant
         ensure_dir(out_dir)
         write_jsonl(rows, out_dir / "predictions.jsonl")
-        result = evaluate_predictions(rows, dataset=args.dataset, prompt_profile=resolve_ace_native_prompt_profile(variant))
+        prompt_profile = variant if generic_prompt_mode else resolve_ace_native_prompt_profile(variant)
+        result = evaluate_predictions(rows, dataset=args.dataset, prompt_profile=prompt_profile)
         result.update(
             {
                 "dataset": args.dataset,
                 "method": "ACE-RAG",
-                "prompt_setting": resolve_ace_native_prompt_profile(variant),
-                "ace_native_prompt_variant": variant,
+                "prompt_setting": prompt_profile,
+                "ace_native_prompt_variant": "" if generic_prompt_mode else variant,
                 "ace_renderer_variant": args.renderer_variant,
                 "top_bundles": args.top_k,
                 "qa_top_k": args.top_k,
@@ -304,6 +314,18 @@ async def run_sprint(args: argparse.Namespace) -> Path:
                 "empty_answer_rate": sum(1 for row in rows if not str(row.get("prediction") or "").strip()) / max(1, len(rows)),
             }
         )
+        avg_input = result.get("avg_input_prompt_tokens")
+        avg_context = result.get("avg_context_tokens")
+        result["avg_input_tokens"] = avg_input
+        result["avg_prompt_tokens"] = avg_input
+        result["avg_prompt_overhead_tokens"] = (
+            float(avg_input) - float(avg_context)
+            if avg_input is not None and avg_context is not None
+            else None
+        )
+        result["generation_ms"] = result.get("generation_latency_ms")
+        result["retrieval_ms"] = result.get("retrieval_latency_ms")
+        result["total_ms"] = result.get("latency_ms")
         dump_json(result, out_dir / "rag_summary.json")
         (out_dir / "eval_summary.md").write_text(summary_markdown(args.dataset, result), encoding="utf-8")
         summary_rows.append(
