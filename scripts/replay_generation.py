@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -26,6 +27,9 @@ from scripts.analyze_failures import (
 )
 from utils.eval_metrics import evaluate_predictions, summary_markdown
 from utils.generation import (
+    ACE_NATIVE_PROMPT_VARIANTS,
+    infer_ace_native_prompt_variant,
+    resolve_ace_native_prompt_profile,
     COMPACTION_PROFILES,
     DEFAULT_RENDERING_PROFILE,
     PROMPT_TEMPLATES,
@@ -39,7 +43,7 @@ from utils.generation import (
     render_context_with_metadata,
 )
 from utils.io_utils import dump_json, load_yaml, read_jsonl, write_jsonl
-from utils.text import token_count, safe_truncate
+from utils.text import normalize_answer, token_count, safe_truncate
 
 
 def now_timestamp() -> str:
@@ -121,6 +125,8 @@ def prompt_experiment_type(source_prompt: str, target_prompt: str, rendering_cha
         return "format_ablation"
     if target_prompt in {"qmrag_compact_chain_qa", "qmrag_compact_chain_light", "qmrag_compact_chain_short_qa"}:
         return "compact_prompt_ablation"
+    if target_prompt.startswith("acerag_native_"):
+        return "ace_native_prompt_ablation"
     if target_prompt in {"qmrag_bundle_qa", "qmrag_bundle_light", "qmrag_bundle_tiny", "qmrag_bundle_short_qa"}:
         return "ablation"
     if context_compaction:
@@ -298,6 +304,7 @@ def replay_rows(
     ordering_source: str = "current",
     compaction_profile: str = "none",
     max_sentences_per_bundle: int = 3,
+    ace_native_prompt_variant: str | None = None,
 ) -> list[dict[str, Any]]:
     out = []
     selected = list(rows)
@@ -371,6 +378,7 @@ def replay_rows(
                 "source_prompt_profile": source_prompt,
                 "source_rendering_profile": str(row.get("rendering_profile") or source_rendering),
                 "prompt_profile": target_prompt,
+                "ace_native_prompt_variant": ace_native_prompt_variant or infer_ace_native_prompt_variant(target_prompt),
                 "rendering_profile": target_rendering,
                 "prompt_experiment_type": prompt_experiment_type(source_prompt, target_prompt, rendering_changed, context_truncation, context_compaction),
                 "context_truncation_enabled": context_truncation,
@@ -448,6 +456,34 @@ def replay_rows(
     return out
 
 
+def git_commit() -> str:
+    try:
+        return subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], text=True).strip()
+    except Exception:
+        return "UNKNOWN"
+
+
+def exact_insufficient_rate(rows: Sequence[Mapping[str, Any]]) -> float:
+    target = normalize_answer("insufficient information")
+    return sum(
+        1.0
+        if normalize_answer(str(row.get("raw_prediction", row.get("prediction", "")) or "")) == target
+        else 0.0
+        for row in rows
+    ) / max(1, len(rows))
+
+
+def empty_answer_rate(rows: Sequence[Mapping[str, Any]]) -> float:
+    return sum(
+        1.0 if not str(row.get("raw_prediction", row.get("prediction", "")) or "").strip() else 0.0
+        for row in rows
+    ) / max(1, len(rows))
+
+
+def run_command() -> str:
+    return " ".join([sys.executable, *sys.argv])
+
+
 def load_generation_config(config_path: Path, args: argparse.Namespace) -> dict[str, Any]:
     cfg = dict((load_yaml(config_path).get("generation", {}) if config_path.exists() else {}) or {})
     cfg["prompt_profile"] = args.prompt_profile or cfg.get("prompt_profile", "common_qa")
@@ -471,6 +507,7 @@ def main() -> None:
     parser.add_argument("--source-prompt", default=None)
     parser.add_argument("--source-rendering-profile", default=None)
     parser.add_argument("--target-prompt", "--prompt-profile", dest="prompt_profile", default=None)
+    parser.add_argument("--ace-native-prompt-variant", choices=ACE_NATIVE_PROMPT_VARIANTS, default=None)
     parser.add_argument("--rendering-profile", choices=sorted(RENDERING_PROFILES), default=None)
     parser.add_argument("--failure-category", choices=FAILURE_CATEGORIES, default=None)
     parser.add_argument("--top-bundles", type=int, default=None)
@@ -481,6 +518,7 @@ def main() -> None:
     parser.add_argument("--sample", type=int, default=None)
     parser.add_argument("--latest", action="store_true")
     parser.add_argument("--output-root", default="outputs/replay")
+    parser.add_argument("--output-dir", default=None, help="Write this replay directly to the given directory.")
     parser.add_argument("--search-output-root", default="outputs")
     parser.add_argument("--config", default="config/default.yaml")
     parser.add_argument("--limit", type=int, default=None)
@@ -493,7 +531,16 @@ def main() -> None:
     parser.add_argument("--vllm-api-key", default=None)
     args = parser.parse_args()
 
+    ace_variant = args.ace_native_prompt_variant
     target_prompt = str(args.prompt_profile or "qmrag_bundle_qa")
+    if ace_variant:
+        variant_prompt = resolve_ace_native_prompt_profile(ace_variant)
+        if args.prompt_profile and args.prompt_profile != variant_prompt:
+            raise SystemExit(
+                f"--target-prompt {args.prompt_profile!r} conflicts with "
+                f"--ace-native-prompt-variant {ace_variant!r} ({variant_prompt!r})"
+            )
+        target_prompt = variant_prompt
     if target_prompt not in PROMPT_TEMPLATES:
         raise SystemExit(f"Unsupported target prompt {target_prompt!r}; choices={sorted(PROMPT_TEMPLATES)}")
     if args.predictions:
@@ -513,6 +560,7 @@ def main() -> None:
     source_rendering = infer_rendering(rows)
     target_rendering = str(args.rendering_profile or source_rendering or DEFAULT_RENDERING_PROFILE)
     cfg = load_generation_config(Path(args.config), args)
+    cfg["prompt_profile"] = target_prompt
     cfg["rendering_profile"] = target_rendering
     effective_top_bundles = 3 if str(args.compaction_profile or "none") in {"top3_chain_dedup", "top3_chain_dedup_no_sources"} and args.top_bundles is None else args.top_bundles
     context_truncation = effective_top_bundles is not None or args.context_token_budget is not None or args.ordering_source != "current"
@@ -536,6 +584,7 @@ def main() -> None:
         args.ordering_source,
         args.compaction_profile,
         args.max_sentences_per_bundle,
+        ace_variant,
     )
     expected_selected_count = len(rows)
     if args.failure_category:
@@ -562,7 +611,7 @@ def main() -> None:
         suffix = f"{suffix}_{args.compaction_profile}"
         if args.compaction_profile in {"sentence_cap", "sentence_cap_no_sources"}:
             suffix = f"{suffix}{args.max_sentences_per_bundle}"
-    out_dir = Path(args.output_root) / timestamp / dataset / suffix
+    out_dir = Path(args.output_dir) if args.output_dir else Path(args.output_root) / timestamp / dataset / suffix
     out_dir.mkdir(parents=True, exist_ok=True)
     pred_out = out_dir / "predictions.jsonl"
     write_jsonl(replayed, pred_out)
@@ -572,6 +621,7 @@ def main() -> None:
             "source_predictions": str(pred_path),
             "source_prompt_profile": source_prompt,
             "target_prompt_profile": target_prompt,
+            "ace_native_prompt_variant": ace_variant or infer_ace_native_prompt_variant(target_prompt),
             "source_rendering_profile": source_rendering,
             "rendering_profile": target_rendering,
             "target_rendering_profile": target_rendering,
@@ -616,8 +666,44 @@ def main() -> None:
             / max(1, len(replayed)),
         }
     )
+    result["insufficient_information_rate"] = exact_insufficient_rate(replayed)
+    result["empty_answer_rate"] = empty_answer_rate(replayed)
     dump_json(result, out_dir / "eval.json")
     (out_dir / "eval_summary.md").write_text(summary_markdown(dataset, result), encoding="utf-8")
+    rag_summary = {
+        "dataset": dataset,
+        "method": "ACE-RAG",
+        "prompt_setting": target_prompt,
+        "ace_native_prompt_variant": ace_variant or infer_ace_native_prompt_variant(target_prompt),
+        "top_bundles": effective_top_bundles,
+        "qa_top_k": effective_top_bundles,
+        "compaction_profile": str(args.compaction_profile or "none"),
+        "n": result.get("n"),
+        "EM": result.get("em"),
+        "F1": result.get("f1"),
+        "Recall@5": result.get("support_title_recall"),
+        "avg_context_tokens": result.get("avg_rendered_context_tokens", result.get("avg_context_tokens", result.get("context_tokens"))),
+        "avg_prompt_text_tokens": result.get("avg_input_prompt_tokens"),
+        "avg_prompt_tokens": result.get("avg_input_prompt_tokens"),
+        "avg_prompt_input_tokens": result.get("avg_input_prompt_tokens"),
+        "F1_per_1k_context_tokens": result.get("F1_per_1k_context_tokens"),
+        "F1_per_1k_prompt_tokens": result.get("F1_per_1k_input_prompt_tokens"),
+        "retrieval_ms": result.get("retrieval_latency_ms"),
+        "generation_ms": result.get("generation_latency_ms"),
+        "total_ms": result.get("latency_ms"),
+        "insufficient_information_rate": result.get("insufficient_information_rate"),
+        "empty_answer_rate": result.get("empty_answer_rate"),
+        "output_path": str(pred_out),
+        "eval_path": str(out_dir / "eval.json"),
+        "git_commit": git_commit(),
+        "command_used": run_command(),
+        "source_predictions": str(pred_path),
+        "prompt_template_preview": PROMPT_TEMPLATES[target_prompt][:2000],
+        "prompt_hash_example": replayed[0].get("prompt_hash") if replayed else None,
+        "evidence_bundles_hash_match_rate": result.get("evidence_bundles_hash_match_rate"),
+        "rendered_context_hash_match_rate": result.get("rendered_context_hash_match_rate"),
+    }
+    dump_json(rag_summary, out_dir / "rag_summary.json")
     print(f"source: {pred_path}")
     print(f"output: {pred_out}")
     print(
@@ -628,6 +714,7 @@ def main() -> None:
                 "rendered_context_hash_match_rate": result["rendered_context_hash_match_rate"],
                 "evidence_bundles_hash_match_rate": result["evidence_bundles_hash_match_rate"],
                 "prompt_profile": target_prompt,
+                "ace_native_prompt_variant": ace_variant or infer_ace_native_prompt_variant(target_prompt),
                 "rendering_profile": target_rendering,
                 "failure_category": args.failure_category,
                 "prompt_experiment_type": result["prompt_experiment_type"],

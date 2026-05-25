@@ -6,7 +6,7 @@ from tabulate import tabulate
 from tqdm import tqdm
 from utils.data_loaders import load_dataset
 from utils.eval_metrics import evaluate_predictions, summary_markdown
-from utils.generation import COMPACTION_PROFILES, DEFAULT_PROMPT_PROFILE, DEFAULT_RENDERING_PROFILE, PROMPT_TEMPLATES, RENDERING_PROFILES, add_token_accounting_fields, generate_answer, normalize_prediction_for_eval
+from utils.generation import ACE_NATIVE_PROMPT_VARIANTS, COMPACTION_PROFILES, DEFAULT_PROMPT_PROFILE, DEFAULT_RENDERING_PROFILE, PROMPT_TEMPLATES, RENDERING_PROFILES, add_token_accounting_fields, generate_answer, infer_ace_native_prompt_variant, normalize_prediction_for_eval, resolve_ace_native_prompt_profile
 from utils.indexing import LightweightEPCIndexer, ensure_mention_bridge_index
 from utils.embedding import build_or_load_dense_indexes
 from utils.io_utils import ExperimentLogger, dump_json, dump_yaml, ensure_dir, load_yaml, now_timestamp, to_jsonable
@@ -22,6 +22,7 @@ def parse_args():
     p.add_argument("--no-embed", "--no-embedding", action="store_true", dest="no_embed"); p.add_argument("--no-llm", action="store_true")
     p.add_argument("--vllm-base-url", default=None); p.add_argument("--vllm-model", default=None); p.add_argument("--embedding-model-path", default=None); p.add_argument("--embedding-device", default=None); p.add_argument("--embedding-batch-size", type=int, default=None)
     p.add_argument("--prompt-profile", choices=sorted(PROMPT_TEMPLATES), default=None)
+    p.add_argument("--ace-native-prompt-variant", choices=ACE_NATIVE_PROMPT_VARIANTS, default=None)
     p.add_argument("--rendering-profile", choices=sorted(RENDERING_PROFILES), default=None)
     p.add_argument("--compaction-profile", choices=sorted(COMPACTION_PROFILES), default=None)
     p.add_argument("--retrieval-variant", choices=["full_hetero","prop_text_only","prop_parent_anchor","prop_parent_mention_bidirectional"], default=None)
@@ -37,7 +38,17 @@ def parse_args():
 def apply_overrides(cfg: Dict[str,Any], args) -> Dict[str,Any]:
     cfg=copy.deepcopy(cfg)
     gen_cfg=cfg.setdefault("generation",{})
-    prompt_profile=args.prompt_profile or gen_cfg.get("prompt_profile") or DEFAULT_PROMPT_PROFILE
+    if args.ace_native_prompt_variant:
+        variant_prompt=resolve_ace_native_prompt_profile(args.ace_native_prompt_variant)
+        if args.prompt_profile and args.prompt_profile != variant_prompt:
+            raise ValueError(f"--prompt-profile {args.prompt_profile!r} conflicts with --ace-native-prompt-variant {args.ace_native_prompt_variant!r} ({variant_prompt!r})")
+        prompt_profile=variant_prompt
+        gen_cfg["ace_native_prompt_variant"]=args.ace_native_prompt_variant
+    else:
+        prompt_profile=args.prompt_profile or gen_cfg.get("prompt_profile") or DEFAULT_PROMPT_PROFILE
+        variant=infer_ace_native_prompt_variant(prompt_profile)
+        if variant:
+            gen_cfg["ace_native_prompt_variant"]=variant
     if prompt_profile not in PROMPT_TEMPLATES:
         raise ValueError(f"Unsupported prompt_profile={prompt_profile!r}; choices={sorted(PROMPT_TEMPLATES)}")
     gen_cfg["prompt_profile"]=prompt_profile
@@ -239,6 +250,8 @@ def prompt_experiment_type(prompt_profile: str, rendering_profile: str | None = 
         return "format_ablation"
     if prompt_profile in {"qmrag_compact_chain_qa","qmrag_compact_chain_light","qmrag_compact_chain_short_qa"}:
         return "compact_prompt_ablation"
+    if prompt_profile.startswith("acerag_native_"):
+        return "ace_native_prompt_ablation"
     if prompt_profile in {"qmrag_bundle_qa","qmrag_bundle_light","qmrag_bundle_tiny","qmrag_bundle_short_qa"}:
         return "ablation"
     return "unknown"
@@ -340,6 +353,7 @@ def run_dataset(dataset: str, cfg: Dict[str,Any], args, timestamp: str):
     logger.log(f"Index target: {index_target_dir}")
     dump_yaml(cfg,out_dir/"config.yaml")
     prompt_profile=str(cfg.get("generation",{}).get("prompt_profile") or DEFAULT_PROMPT_PROFILE)
+    ace_native_prompt_variant=str(cfg.get("generation",{}).get("ace_native_prompt_variant") or infer_ace_native_prompt_variant(prompt_profile) or "")
     rendering_profile=str(cfg.get("generation",{}).get("rendering_profile") or DEFAULT_RENDERING_PROFILE)
     compaction_profile=str(cfg.get("generation",{}).get("compaction_profile") or "none")
     ablation_variant=str(cfg.get("run",{}).get("ablation_variant") or "")
@@ -400,7 +414,7 @@ def run_dataset(dataset: str, cfg: Dict[str,Any], args, timestamp: str):
                     retrieval_variant=str(cfg.get("retrieval",{}).get("retrieval_variant","full_hetero"))
                     seed_selection_variant=str(cfg.get("retrieval",{}).get("seed_selection_variant","medoid_current"))
                     ret["diagnostics"]["ablation_variant"]=ablation_variant
-                    row={"dataset":dataset,"id":qa.id,"question":qa.question,"raw_prediction":raw_prediction,"prediction":prediction,"answers":qa.answers,"support_titles":qa.support_titles,"support_facts":qa.support_facts,"prompt_profile":row_prompt_profile,"rendering_profile":row_rendering_profile,"compaction_profile":row_compaction_profile,"context_compaction_enabled":row_compaction_profile!="none","prompt_experiment_type":prompt_experiment_type(row_prompt_profile,row_rendering_profile),"retrieval_variant":retrieval_variant,"seed_selection_variant":seed_selection_variant,"ablation_variant":ablation_variant,"generation_provider":generation_provider,"evidence_bundles":ret["evidence_bundles"],"seeds":ret["seeds"],"retrieval_diagnostics":ret["diagnostics"],"generation_latency_s":float(gen.get("generation_latency_s",round(time.perf_counter()-t,6)) or 0.0),"llm_provider":generation_provider,"llm_model":gen.get("model"),"llm_usage":gen.get("usage")}
+                    row={"dataset":dataset,"id":qa.id,"question":qa.question,"raw_prediction":raw_prediction,"prediction":prediction,"answers":qa.answers,"support_titles":qa.support_titles,"support_facts":qa.support_facts,"prompt_profile":row_prompt_profile,"ace_native_prompt_variant":ace_native_prompt_variant or infer_ace_native_prompt_variant(row_prompt_profile),"rendering_profile":row_rendering_profile,"compaction_profile":row_compaction_profile,"context_compaction_enabled":row_compaction_profile!="none","prompt_experiment_type":prompt_experiment_type(row_prompt_profile,row_rendering_profile),"retrieval_variant":retrieval_variant,"seed_selection_variant":seed_selection_variant,"ablation_variant":ablation_variant,"generation_provider":generation_provider,"evidence_bundles":ret["evidence_bundles"],"seeds":ret["seeds"],"retrieval_diagnostics":ret["diagnostics"],"generation_latency_s":float(gen.get("generation_latency_s",round(time.perf_counter()-t,6)) or 0.0),"llm_provider":generation_provider,"llm_model":gen.get("model"),"llm_usage":gen.get("usage")}
                     row.update(dict(gen.get("context_stats",{}) or {}))
                     if gen.get("generation_error"): row["generation_error"]=gen.get("generation_error")
                     row=add_generation_logging_fields(row,gen,cfg)
@@ -408,7 +422,7 @@ def run_dataset(dataset: str, cfg: Dict[str,Any], args, timestamp: str):
                     logger.event({"event":"example.error","dataset":dataset,"qid":qa.id,"error":repr(e)})
                     if not args.continue_on_error: raise
                     generation_provider=cfg.get("generation",{}).get("provider")
-                    row={"dataset":dataset,"id":qa.id,"question":qa.question,"raw_prediction":"","prediction":"","answers":qa.answers,"support_titles":qa.support_titles,"prompt_profile":prompt_profile,"rendering_profile":rendering_profile,"compaction_profile":compaction_profile,"context_compaction_enabled":compaction_profile!="none","prompt_experiment_type":prompt_experiment_type(prompt_profile,rendering_profile),"retrieval_variant":str(cfg.get("retrieval",{}).get("retrieval_variant","full_hetero")),"seed_selection_variant":str(cfg.get("retrieval",{}).get("seed_selection_variant","medoid_current")),"ablation_variant":ablation_variant,"generation_provider":generation_provider,"error":repr(e),"evidence_bundles":[],"seeds":[],"retrieval_diagnostics":{"ablation_variant":ablation_variant,"candidate_count":0,"seed_count":0,"bundle_count":0,"context_tokens":0,"timings":{}},"generation_latency_s":0.0,"llm_provider":generation_provider}
+                    row={"dataset":dataset,"id":qa.id,"question":qa.question,"raw_prediction":"","prediction":"","answers":qa.answers,"support_titles":qa.support_titles,"prompt_profile":prompt_profile,"ace_native_prompt_variant":ace_native_prompt_variant or infer_ace_native_prompt_variant(prompt_profile),"rendering_profile":rendering_profile,"compaction_profile":compaction_profile,"context_compaction_enabled":compaction_profile!="none","prompt_experiment_type":prompt_experiment_type(prompt_profile,rendering_profile),"retrieval_variant":str(cfg.get("retrieval",{}).get("retrieval_variant","full_hetero")),"seed_selection_variant":str(cfg.get("retrieval",{}).get("seed_selection_variant","medoid_current")),"ablation_variant":ablation_variant,"generation_provider":generation_provider,"error":repr(e),"evidence_bundles":[],"seeds":[],"retrieval_diagnostics":{"ablation_variant":ablation_variant,"candidate_count":0,"seed_count":0,"bundle_count":0,"context_tokens":0,"timings":{}},"generation_latency_s":0.0,"llm_provider":generation_provider}
                     row=add_generation_logging_fields(row,{"rendered_context":"","prompt":""},cfg)
                 preds.append(row)
                 with timing.time_block(dataset=dataset, query_id=qa.id, stage="write_outputs", num_items_in=1) as twrite:
@@ -421,6 +435,7 @@ def run_dataset(dataset: str, cfg: Dict[str,Any], args, timestamp: str):
             res["retrieval_variant"]=str(cfg.get("retrieval",{}).get("retrieval_variant","full_hetero"))
             res["seed_selection_variant"]=str(cfg.get("retrieval",{}).get("seed_selection_variant","medoid_current"))
             res["ablation_variant"]=ablation_variant
+            res["ace_native_prompt_variant"]=ace_native_prompt_variant or infer_ace_native_prompt_variant(prompt_profile)
             res["compaction_profile"]=compaction_profile
             res["context_compaction_enabled"]=compaction_profile!="none"
             if index_info.get("source_index_dir"): res["source_index_dir"]=index_info.get("source_index_dir")

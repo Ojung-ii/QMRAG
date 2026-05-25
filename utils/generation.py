@@ -240,6 +240,186 @@ Context:
 Answer:""",
 }
 
+PROMPT_TEMPLATES.update({
+    # ACE-RAG native prompt ablation variants. p0 is intentionally an exact
+    # alias of the current QMRAG/ACE-RAG short-style native prompt.
+    "acerag_native_p0_current": PROMPT_TEMPLATES["qmrag_bundle_short_qa"],
+    "acerag_native_p1_supporting_fallback": """---Role---
+
+You are an expert QA assistant specializing in short answer extraction from evidence-chain context.
+
+---Goal---
+
+Answer the user query using ONLY the provided Context.
+Return only the final short answer span.
+
+---Instructions---
+
+1. Grounding:
+  - Use only facts present in the Context.
+  - Do not use outside knowledge.
+  - If the Context does not contain enough evidence to determine the answer, output exactly: insufficient information
+
+2. Evidence use:
+  - The Context may contain Evidence Chain, Multi-Anchor Evidence, and Supporting Evidence sections.
+  - Use Supporting Evidence as direct answer evidence when it explicitly answers the question.
+  - Do not require an Evidence Chain if Supporting Evidence alone is sufficient.
+  - For Evidence Chain, use the first sentence to connect the question anchor to the bridge entity.
+  - Then use the bridge/property sentence as the answer evidence when it satisfies the remaining question.
+  - For Multi-Anchor Evidence, compare only the listed anchors using the provided evidence.
+  - Use Supporting Evidence also when it confirms or completes the Evidence Chain.
+  - Ignore empty sections, source lines, metadata, and unrelated anchors unless their evidence sentences help answer the question.
+
+3. Reasoning policy:
+  - Reason internally, but do not reveal chain-of-thought.
+  - Do not output intermediate analysis.
+
+4. Output format:
+  - Output exactly one line with only the final answer text.
+  - Do not output Markdown, bullets, headings, JSON, or code blocks.
+  - Do not output citations or a references section.
+  - Do not output prefixes such as "Answer:", "Final answer:", or "So the answer is:".
+  - For yes/no questions, output exactly `yes` or `no` in lowercase.
+
+5. Language:
+  - Use the same language as the user query unless the answer is a proper noun.
+
+Question: {question}
+Context:
+{context}
+Answer:""",
+    "acerag_native_p2_relaxed_chain": """---Role---
+
+You are an expert QA assistant specializing in short answer extraction from compact retrieved evidence.
+
+---Goal---
+
+Answer the user query using ONLY the provided Context.
+Return only the final short answer span.
+
+---Instructions---
+
+1. Grounding:
+  - Use only facts present in the Context.
+  - Do not use outside knowledge.
+  - If the Context does not contain enough evidence to determine the answer, output exactly: insufficient information
+
+2. Evidence use:
+  - First, look for evidence sentences that directly answer the question.
+  - Evidence Chain, Multi-Anchor Evidence, and Supporting Evidence are all valid evidence sources.
+  - Use Supporting Evidence as direct answer evidence when it answers the question.
+  - Do not require an Evidence Chain if Supporting Evidence alone is sufficient.
+  - If the answer requires a bridge entity, comparison, or multi-hop connection, use Evidence Chain or Multi-Anchor Evidence to connect the relevant facts.
+  - For Evidence Chain, use the chain to identify the question anchor, bridge entity, relation, and answer evidence.
+  - Do not assume the answer must appear in a fixed sentence position.
+  - For Multi-Anchor Evidence, compare or combine only the listed anchors using the provided evidence.
+  - Ignore empty sections, source lines, metadata, and unrelated anchors unless their evidence sentences help answer the question.
+
+3. Answer selection:
+  - Return the shortest answer span that correctly answers the question.
+  - Preserve conjunctions when multiple roles, entities, or attributes form the answer.
+
+4. Reasoning policy:
+  - Reason internally, but do not reveal chain-of-thought.
+  - Do not output intermediate analysis.
+
+5. Output format:
+  - Output exactly one line with only the final answer text.
+  - Do not output Markdown, bullets, headings, JSON, or code blocks.
+  - Do not output citations or a references section.
+  - Do not output prefixes such as "Answer:", "Final answer:", or "So the answer is:".
+  - For yes/no questions, output exactly `yes` or `no` in lowercase.
+
+6. Language:
+  - Use the same language as the user query unless the answer is a proper noun.
+
+Question: {question}
+Context:
+{context}
+Answer:""",
+    "acerag_native_p3_minimal_extraction": """---Role---
+
+You are an expert reading comprehension assistant.
+
+---Goal---
+
+Answer the question using only the provided Context.
+Return the shortest text span that answers the question.
+
+---Instructions---
+
+1. Use only the Context.
+2. Find the sentence or connected evidence that answers the question.
+3. If the question requires comparison or multi-hop reasoning, combine only the facts stated in the Context.
+4. Evidence Chain, Multi-Anchor Evidence, and Supporting Evidence are all valid evidence sources.
+5. Ignore metadata, source IDs, empty sections, and unrelated anchors.
+6. If the answer cannot be determined from the Context, output exactly: insufficient information
+7. Output exactly one line with only the final answer.
+8. Do not output reasoning, explanations, citations, Markdown, prefixes, or JSON.
+9. For yes/no questions, output exactly `yes` or `no` in lowercase.
+10. Use the same language as the user query unless the answer is a proper noun.
+
+Question: {question}
+Context:
+{context}
+Answer:""",
+    "acerag_native_p4_fewshot_extraction": """---Role---
+
+You are an expert reading comprehension assistant.
+
+---Goal---
+
+Answer the question using only the provided Context.
+Return the shortest text span that answers the question.
+
+---Instructions---
+
+1. Use only the Context.
+2. Find the sentence or connected evidence that answers the question.
+3. If the question requires comparison or multi-hop reasoning, combine only the facts stated in the Context.
+4. Evidence Chain, Multi-Anchor Evidence, and Supporting Evidence are all valid evidence sources.
+5. Ignore metadata, source IDs, empty sections, and unrelated anchors.
+6. If the answer cannot be determined from the Context, output exactly: insufficient information
+7. Output exactly one line with only the final answer.
+8. Do not output reasoning, explanations, citations, Markdown, prefixes, or JSON.
+9. For yes/no questions, output exactly `yes` or `no` in lowercase.
+10. Use the same language as the user query unless the answer is a proper noun.
+
+Example:
+Question: When was Neville A. Stanton's employer founded?
+Context:
+[Supporting Evidence | anchor=Neville A. Stanton]
+- Neville A. Stanton is a British Professor of Human Factors and Ergonomics at the University of Southampton.
+[Supporting Evidence | anchor=University of Southampton]
+- The University of Southampton was founded in 1862.
+Answer:
+1862
+
+Question: {question}
+Context:
+{context}
+Answer:""",
+})
+
+ACE_NATIVE_PROMPT_VARIANT_TO_PROFILE = {
+    "p0_current": "acerag_native_p0_current",
+    "p1_supporting_fallback": "acerag_native_p1_supporting_fallback",
+    "p2_relaxed_chain": "acerag_native_p2_relaxed_chain",
+    "p3_minimal_extraction": "acerag_native_p3_minimal_extraction",
+    "p4_fewshot_extraction": "acerag_native_p4_fewshot_extraction",
+}
+ACE_NATIVE_PROMPT_VARIANTS = tuple(ACE_NATIVE_PROMPT_VARIANT_TO_PROFILE)
+ACE_NATIVE_PROMPT_PROFILE_TO_VARIANT = {v: k for k, v in ACE_NATIVE_PROMPT_VARIANT_TO_PROFILE.items()}
+
+def resolve_ace_native_prompt_profile(variant: str | None) -> str:
+    key = str(variant or "p0_current")
+    if key not in ACE_NATIVE_PROMPT_VARIANT_TO_PROFILE:
+        raise ValueError(f"Unsupported ace_native_prompt_variant={key!r}; choices={list(ACE_NATIVE_PROMPT_VARIANTS)}")
+    return ACE_NATIVE_PROMPT_VARIANT_TO_PROFILE[key]
+
+def infer_ace_native_prompt_variant(prompt_profile: str | None) -> str | None:
+    return ACE_NATIVE_PROMPT_PROFILE_TO_VARIANT.get(str(prompt_profile or ""))
+
 INSUFFICIENT_PHRASES = (
     "insufficient information",
     "cannot be determined",
