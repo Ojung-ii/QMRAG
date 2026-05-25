@@ -1517,11 +1517,11 @@ def normalize_prediction_for_eval(prediction: Any) -> str:
         return ""
     return str(prediction).strip()
 
-def build_generation_prompt(question: str, bundles: Sequence[Mapping[str,Any]], cfg: Optional[Mapping[str,Any]]=None) -> tuple[str, str, str]:
+def build_generation_prompt(question: str, bundles: Sequence[Mapping[str,Any]], cfg: Optional[Mapping[str,Any]]=None) -> tuple[str, str, str, dict[str,Any]]:
     cfg=cfg or {}
     prompt_profile=str(cfg.get("prompt_profile") or DEFAULT_PROMPT_PROFILE)
     rendering_profile=str(cfg.get("rendering_profile") or DEFAULT_RENDERING_PROFILE)
-    context=render_context(
+    context,context_stats=render_context_with_metadata(
         bundles,
         rendering_profile,
         int(cfg.get("max_context_chars",24000)),
@@ -1529,7 +1529,7 @@ def build_generation_prompt(question: str, bundles: Sequence[Mapping[str,Any]], 
         compaction_profile=str(cfg.get("compaction_profile") or "none"),
         max_sentences_per_bundle=int(cfg.get("max_sentences_per_bundle",3) or 3),
     )
-    return build_prompt(question, context, prompt_profile), prompt_profile, context
+    return build_prompt(question, context, prompt_profile), prompt_profile, context, context_stats
 
 def extractive_fallback_answer(question: str, bundles: Sequence[Mapping[str,Any]]) -> str:
     cands=[]
@@ -1574,24 +1574,26 @@ def _generate_vllm(prompt: str, cfg: Mapping[str,Any]) -> Dict[str,Any]:
 def generate_answer(question: str, bundles: Sequence[Mapping[str,Any]], cfg: Mapping[str,Any]) -> Dict[str,Any]:
     provider=str(cfg.get("provider","none")).lower()
     render_t0=time.perf_counter()
-    prompt,prompt_profile,rendered_context=build_generation_prompt(question,bundles,cfg)
+    prompt,prompt_profile,rendered_context,context_stats=build_generation_prompt(question,bundles,cfg)
     context_rendering_s=round(time.perf_counter()-render_t0,6)
     rendering_profile=str(cfg.get("rendering_profile") or DEFAULT_RENDERING_PROFILE)
+    compaction_profile=str(context_stats.get("compaction_profile") or cfg.get("compaction_profile") or "none")
+    context_fields={"context_stats":context_stats,"compaction_profile":compaction_profile,**context_stats}
     t0=time.perf_counter()
     if provider in {"none","extractive","fallback","no-llm"}:
         raw_prediction=extractive_fallback_answer(question,bundles)
         generation_s=round(time.perf_counter()-t0,6)
-        return {"raw_prediction":raw_prediction,"prediction":normalize_prediction_for_eval(raw_prediction),"rendered_context":rendered_context,"prompt":prompt,"prompt_profile":prompt_profile,"rendering_profile":rendering_profile,"generation_latency_s":generation_s,"generation_stage_timings_s":{"context_rendering":context_rendering_s,"generation":generation_s},"llm_provider":"extractive_fallback","generation_provider":"extractive_fallback"}
+        return {"raw_prediction":raw_prediction,"prediction":normalize_prediction_for_eval(raw_prediction),"rendered_context":rendered_context,"prompt":prompt,"prompt_profile":prompt_profile,"rendering_profile":rendering_profile,**context_fields,"generation_latency_s":generation_s,"generation_stage_timings_s":{"context_rendering":context_rendering_s,"generation":generation_s},"llm_provider":"extractive_fallback","generation_provider":"extractive_fallback"}
     if provider=="vllm":
         last=None
         for attempt in range(int(cfg.get("retries",1))+1):
             try:
                 out=_generate_vllm(prompt,cfg)
                 generation_s=round(time.perf_counter()-t0,6)
-                out["prompt"]=prompt; out["rendered_context"]=rendered_context; out["prompt_profile"]=prompt_profile; out["rendering_profile"]=rendering_profile; out["generation_latency_s"]=generation_s; out["generation_stage_timings_s"]={"context_rendering":context_rendering_s,"generation":generation_s}; return out
+                out["prompt"]=prompt; out["rendered_context"]=rendered_context; out["prompt_profile"]=prompt_profile; out["rendering_profile"]=rendering_profile; out.update(context_fields); out["generation_latency_s"]=generation_s; out["generation_stage_timings_s"]={"context_rendering":context_rendering_s,"generation":generation_s}; return out
             except Exception as e:
                 last=e
                 if attempt<int(cfg.get("retries",1)): time.sleep(float(cfg.get("retry_sleep_s",2.0)))
         generation_s=round(time.perf_counter()-t0,6)
-        return {"raw_prediction":"","prediction":"","rendered_context":rendered_context,"prompt":prompt,"prompt_profile":prompt_profile,"rendering_profile":rendering_profile,"generation_latency_s":generation_s,"generation_stage_timings_s":{"context_rendering":context_rendering_s,"generation":generation_s},"llm_provider":"vllm","generation_provider":"vllm","generation_error":repr(last)}
+        return {"raw_prediction":"","prediction":"","rendered_context":rendered_context,"prompt":prompt,"prompt_profile":prompt_profile,"rendering_profile":rendering_profile,**context_fields,"generation_latency_s":generation_s,"generation_stage_timings_s":{"context_rendering":context_rendering_s,"generation":generation_s},"llm_provider":"vllm","generation_provider":"vllm","generation_error":repr(last)}
     raise ValueError(f"Unsupported generation.provider={provider}")
