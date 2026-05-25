@@ -15,6 +15,7 @@ RENDERING_PROFILES = (
 COMPACTION_PROFILES = (
     "none",
     "chain_dedup",
+    "chain_dedup_budget",
     "chain_skeleton",
     "chain_plus1",
     "sentence_cap",
@@ -1248,6 +1249,8 @@ def _render_compacted_context(
     if profile=="metadata_only_compact":
         return _render_metadata_only_compact(bundles,max_chars)
     if profile=="chain_dedup":
+        return _render_chain_dedup(bundles,max_chars)
+    if profile=="chain_dedup_budget":
         return _render_chain_dedup(bundles,max_chars)
     if profile=="chain_dedup_no_sources":
         return _render_chain_dedup_no_sources(bundles,max_chars,support_limit=None)
