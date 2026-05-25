@@ -406,6 +406,150 @@ Question: {question}
 Context:
 {context}
 Answer:""",
+    "acerag_native_p5_hippo_cot_style": """As an advanced reading comprehension assistant, your task is to answer the question using only the provided evidence context.
+
+You may reason internally. If you write reasoning, put the final concise answer after "Answer:".
+The final answer must be a short answer span.
+
+Example:
+Context:
+[Supporting Evidence 1 | anchor=Neville A. Stanton]
+- Neville A. Stanton: Neville A. Stanton is a British Professor of Human Factors and Ergonomics at the University of Southampton.
+[Supporting Evidence 2 | anchor=University of Southampton]
+- University of Southampton: The University of Southampton was founded in 1862.
+
+Question: When was Neville A. Stanton's employer founded?
+Thought: Neville A. Stanton's employer is the University of Southampton. The University of Southampton was founded in 1862.
+Answer: 1862
+
+Instruction:
+Use only the provided Context.
+Return the final short answer.
+If the answer cannot be determined from the Context, output exactly: insufficient information.
+For yes/no questions, output exactly yes or no in lowercase.
+
+Question: {question}
+Context:
+{context}
+Thought:""",
+    "acerag_native_p6_aggressive_span": """---Role---
+
+You are an expert short-answer extractor.
+
+---Goal---
+
+Answer the question using ONLY the provided Context.
+Return the shortest supported answer span.
+
+---Instructions---
+
+1. Search all Evidence Chain, Multi-Anchor Evidence, and Supporting Evidence sections.
+2. If any sentence directly or indirectly supports an answer, output the best supported short answer span.
+3. Do not output insufficient information merely because the evidence is compact or split across sections.
+4. Output insufficient information only if the Context contains no evidence sufficient to determine the answer.
+5. Prefer an answer span from the evidence sentence over a paraphrase.
+6. For questions asking occupation, role, nationality, location, date, number, person, organization, or title, output the specific phrase requested.
+7. For comparison questions, compare only the values explicitly given in the Context.
+8. Ignore source ids, relation_title fields, and metadata.
+9. Output exactly one line. No reasoning, citations, markdown, or prefixes.
+10. For yes/no questions, output exactly yes or no in lowercase.
+
+Question: {question}
+Context:
+{context}
+Answer:""",
+    "acerag_native_p7_anchor_priority": """---Role---
+
+You are an expert QA assistant for structured evidence contexts.
+
+---Goal---
+
+Answer the question using ONLY the provided Context.
+Return only the final short answer span.
+
+---Instructions---
+
+1. First identify the main entity or entities asked about in the Question.
+2. Prefer evidence sections whose anchor matches the question entity or a bridge entity connected from it.
+3. Do not answer from a similarly named but unrelated anchor unless the question explicitly asks about that anchor.
+4. Evidence Chain, Multi-Anchor Evidence, and Supporting Evidence are all valid evidence sources.
+5. Use Supporting Evidence directly if it answers the question.
+6. For bridge questions, use the source-side evidence to identify the bridge entity, then use the bridge-side evidence to extract the answer.
+7. For comparison questions, compare only the listed anchors and values in the Context.
+8. Ignore empty sections, source ids, relation_title fields, and metadata.
+9. If the Context does not contain enough evidence to determine the answer, output exactly: insufficient information.
+10. Output exactly one line with only the final answer. No reasoning, citations, markdown, or prefixes.
+11. For yes/no questions, output exactly yes or no in lowercase.
+
+Question: {question}
+Context:
+{context}
+Answer:""",
+    "acerag_native_p8_r0_section_aware": """---Role---
+
+You are an expert reading-comprehension assistant for ACE-RAG structured evidence.
+
+---Goal---
+
+Answer the question using ONLY the provided Context.
+Return only the final short answer span.
+
+---Instructions---
+
+1. The Context is organized into evidence sections.
+2. Section headers identify the evidence type and anchor entity.
+3. Earlier evidence sections are usually more relevant, but use later sections when they complete the answer.
+4. Use Evidence Chain sections to connect a question anchor to a bridge entity or answer entity.
+5. Use Multi-Anchor Evidence sections for comparison or questions involving multiple entities.
+6. Use Supporting Evidence sections as direct answer evidence when they answer the question.
+7. Ignore source ids, relation_title fields, and empty evidence sections.
+8. Do not use outside knowledge.
+9. If a supported answer span exists anywhere in the Context, output that answer span.
+10. Output insufficient information only when no evidence in the Context supports an answer.
+11. Output exactly one line with only the final answer.
+12. Do not output reasoning, explanations, citations, markdown, JSON, or prefixes.
+13. For yes/no questions, output exactly yes or no in lowercase.
+
+Question: {question}
+Context:
+{context}
+Answer:""",
+    "acerag_native_p9_hippo_style_answer_only": """---Role---
+
+You are an advanced reading comprehension assistant.
+
+---Goal---
+
+Answer the question using only the provided Context.
+Return only the final short answer.
+
+---Example---
+
+Context:
+[Supporting Evidence 1 | anchor=Neville A. Stanton]
+- Neville A. Stanton: Neville A. Stanton is a British Professor of Human Factors and Ergonomics at the University of Southampton.
+[Supporting Evidence 2 | anchor=University of Southampton]
+- University of Southampton: The University of Southampton was founded in 1862.
+Question: When was Neville A. Stanton's employer founded?
+Answer:
+1862
+
+---Instructions---
+
+1. Use only the Context.
+2. Identify the question entity, bridge entity, and answer evidence when needed.
+3. Use Supporting Evidence directly if it answers the question.
+4. For comparison questions, compare only facts stated in the Context.
+5. Ignore source ids, relation_title fields, and metadata.
+6. If the answer cannot be determined from the Context, output exactly: insufficient information.
+7. Output exactly one line with only the final answer.
+8. Do not output reasoning, explanations, citations, markdown, JSON, or prefixes.
+9. For yes/no questions, output exactly yes or no in lowercase.
+
+Question: {question}
+Context:
+{context}
+Answer:""",
 })
 
 ACE_NATIVE_PROMPT_VARIANT_TO_PROFILE = {
@@ -414,6 +558,11 @@ ACE_NATIVE_PROMPT_VARIANT_TO_PROFILE = {
     "p2_relaxed_chain": "acerag_native_p2_relaxed_chain",
     "p3_minimal_extraction": "acerag_native_p3_minimal_extraction",
     "p4_fewshot_extraction": "acerag_native_p4_fewshot_extraction",
+    "p5_hippo_cot_style": "acerag_native_p5_hippo_cot_style",
+    "p6_aggressive_span": "acerag_native_p6_aggressive_span",
+    "p7_anchor_priority": "acerag_native_p7_anchor_priority",
+    "p8_r0_section_aware": "acerag_native_p8_r0_section_aware",
+    "p9_hippo_style_answer_only": "acerag_native_p9_hippo_style_answer_only",
 }
 ACE_NATIVE_PROMPT_VARIANTS = tuple(ACE_NATIVE_PROMPT_VARIANT_TO_PROFILE)
 ACE_NATIVE_PROMPT_PROFILE_TO_VARIANT = {v: k for k, v in ACE_NATIVE_PROMPT_VARIANT_TO_PROFILE.items()}
