@@ -30,8 +30,10 @@ from utils.generation import (
     DEFAULT_RENDERING_PROFILE,
     PROMPT_TEMPLATES,
     RENDERING_PROFILES,
+    _load_counting_tokenizer,
     add_token_accounting_fields,
     build_prompt,
+    count_tokens,
     normalize_prediction_for_eval,
     render_context,
     render_context_with_metadata,
@@ -157,6 +159,33 @@ def render_context_with_truncation(
     candidates = ordered[: max(0, int(top_bundles))] if top_bundles is not None else ordered
     max_chars = int(cfg.get("max_context_chars", 24000))
     token_budget = cfg.get("context_token_budget")
+    if str(compaction_profile or "none") == "full_structured_budget" and context_token_budget is not None:
+        tokenizer, _counter_source = _load_counting_tokenizer(cfg, cfg.get("model"))
+        effective_budget = int(context_token_budget)
+        context = ""
+        stats: dict[str, Any] = {}
+        for _ in range(8):
+            context, stats = render_context_with_metadata(
+                candidates,
+                rendering_profile=target_rendering,
+                max_chars=max_chars,
+                token_budget=effective_budget,
+                compaction_profile=compaction_profile,
+                max_sentences_per_bundle=max_sentences_per_bundle,
+            )
+            actual_tokens = count_tokens(context, tokenizer)
+            if actual_tokens <= int(context_token_budget) or effective_budget <= 1:
+                break
+            scale = max(0.2, min(0.95, (float(context_token_budget) / max(1.0, float(actual_tokens))) * 0.92))
+            next_budget = max(1, int(effective_budget * scale))
+            if next_budget >= effective_budget:
+                next_budget = effective_budget - 1
+            effective_budget = next_budget
+        stats["effective_context_token_budget"] = effective_budget
+        rendered_count = int(stats.get("rendered_bundle_count", 0) or 0)
+        dropped_count = max(0, len(original_bundles) - rendered_count)
+        stats["dropped_bundle_count"] = dropped_count
+        return context, list(candidates), dropped_count, stats
     if context_token_budget is None:
         context, stats = render_context_with_metadata(
             candidates,
@@ -284,6 +313,11 @@ def replay_rows(
     context_compaction = compaction_profile != "none"
     rendering_changed = rerender_context and (target_rendering != source_rendering or any(str(row.get("rendering_profile") or source_rendering) != target_rendering for row in selected))
     for row in selected:
+        row_cfg: Mapping[str, Any] = cfg
+        if str(cfg.get("model", "auto") or "auto").lower() in {"", "auto"} and row.get("llm_model"):
+            tmp_cfg = dict(cfg)
+            tmp_cfg["model"] = row.get("llm_model")
+            row_cfg = tmp_cfg
         source_context = context_from_row(row)
         source_hash = str(row.get("rendered_context_hash") or sha256_text(source_context))
         source_context_tokens = row.get("rendered_context_tokens")
@@ -298,7 +332,7 @@ def replay_rows(
             context, rendered_bundles, dropped_bundle_count, compaction_stats = render_context_with_truncation(
                 row.get("evidence_bundles", []) or [],
                 target_rendering,
-                cfg,
+                row_cfg,
                 effective_top_bundles,
                 context_token_budget,
                 ordering_source,
@@ -309,8 +343,8 @@ def replay_rows(
             context, compaction_stats = render_context_with_metadata(
                 row.get("evidence_bundles", []) or [],
                 rendering_profile=target_rendering,
-                max_chars=int(cfg.get("max_context_chars", 24000)),
-                token_budget=cfg.get("context_token_budget"),
+                max_chars=int(row_cfg.get("max_context_chars", 24000)),
+                token_budget=row_cfg.get("context_token_budget"),
                 compaction_profile="none",
                 max_sentences_per_bundle=max_sentences_per_bundle,
             )
@@ -347,8 +381,8 @@ def replay_rows(
                 "context_token_budget": context_token_budget,
                 "ordering_source": ordering_source,
                 "original_bundle_count": original_bundle_count,
-                "rendered_bundle_count": len(rendered_bundles),
-                "dropped_bundle_count": dropped_bundle_count,
+                "rendered_bundle_count": int(compaction_stats.get("rendered_bundle_count", len(rendered_bundles)) or 0),
+                "dropped_bundle_count": int(compaction_stats.get("dropped_bundle_count", dropped_bundle_count) or 0),
                 "raw_prediction": str(gen.get("raw_prediction", "")),
                 "prediction": normalize_prediction_for_eval(gen.get("prediction", gen.get("raw_prediction", ""))),
                 "generation_provider": gen.get("generation_provider", "vllm"),
@@ -385,16 +419,28 @@ def replay_rows(
         source_input_value = float(source_input_tokens or 0.0)
         new_row["source_rendered_context_tokens"] = int(source_context_tokens or 0)
         new_row["source_input_prompt_tokens"] = int(source_input_value or 0)
+        new_row["actual_context_tokens"] = int(new_row.get("rendered_context_tokens", 0) or 0)
+        if context_token_budget is not None:
+            saturation_target = min(float(context_token_budget), float(source_context_tokens or context_token_budget))
+            new_row["budget_saturated"] = float(new_row["actual_context_tokens"]) >= 0.95 * max(1.0, saturation_target)
+        else:
+            new_row["budget_saturated"] = False
         new_row["token_reduction_rate"] = 1.0 - float(new_row.get("input_prompt_tokens", 0.0) or 0.0) / max(1e-9, source_input_value) if source_input_value > 0 else 0.0
         source_context_token_value = float(source_context_tokens or 0.0)
         new_row["compaction_token_reduction_rate"] = 1.0 - float(new_row.get("rendered_context_tokens", 0.0) or 0.0) / max(1e-9, source_context_token_value) if source_context_token_value > 0 else 0.0
         new_row["rendered_sentence_count"] = int(compaction_stats.get("rendered_sentence_count", 0) or 0)
         new_row["avg_rendered_sentences_per_bundle"] = float(compaction_stats.get("avg_sentences_per_bundle", 0.0) or 0.0)
         new_row["rendered_chain_count"] = int(compaction_stats.get("rendered_chain_count", 0) or 0)
+        new_row["rendered_chain_sentence_count"] = int(compaction_stats.get("rendered_chain_sentence_count", 0) or 0)
+        new_row["rendered_support_count"] = int(compaction_stats.get("rendered_support_count", compaction_stats.get("support_sentence_count", 0)) or 0)
+        new_row["rendered_source_count"] = int(compaction_stats.get("rendered_source_count", 0) or 0)
         new_row["support_sentence_count"] = int(compaction_stats.get("support_sentence_count", 0) or 0)
         new_row["fallback_used"] = bool(compaction_stats.get("fallback_used", False))
         new_row["fallback_rate"] = 1.0 if new_row["fallback_used"] else 0.0
         new_row["dropped_sentence_count"] = int(compaction_stats.get("dropped_sentence_count", 0) or 0)
+        new_row["dropped_chain_sentence_count"] = int(compaction_stats.get("dropped_chain_sentence_count", 0) or 0)
+        new_row["dropped_support_count"] = int(compaction_stats.get("dropped_support_count", 0) or 0)
+        new_row["dropped_source_count"] = int(compaction_stats.get("dropped_source_count", 0) or 0)
         new_row["duplicate_removed_count"] = int(compaction_stats.get("duplicate_removed_count", 0) or 0)
         new_row["source_removed_count"] = int(compaction_stats.get("source_removed_count", 0) or 0)
         new_row["metadata_removed_count"] = int(compaction_stats.get("metadata_removed_count", 0) or 0)
@@ -540,13 +586,21 @@ def main() -> None:
             "ordering_source": args.ordering_source,
             "avg_rendered_bundle_count": sum(float(x.get("rendered_bundle_count", 0.0) or 0.0) for x in replayed) / max(1, len(replayed)),
             "avg_dropped_bundle_count": sum(float(x.get("dropped_bundle_count", 0.0) or 0.0) for x in replayed) / max(1, len(replayed)),
+            "avg_actual_context_tokens": sum(float(x.get("actual_context_tokens", x.get("rendered_context_tokens", 0.0)) or 0.0) for x in replayed) / max(1, len(replayed)),
+            "budget_saturated_rate": sum(float(1.0 if x.get("budget_saturated") else 0.0) for x in replayed) / max(1, len(replayed)),
             "token_reduction_rate": sum(float(x.get("token_reduction_rate", 0.0) or 0.0) for x in replayed) / max(1, len(replayed)),
             "avg_rendered_sentence_count": sum(float(x.get("rendered_sentence_count", 0.0) or 0.0) for x in replayed) / max(1, len(replayed)),
             "avg_sentences_per_bundle": sum(float(x.get("avg_rendered_sentences_per_bundle", 0.0) or 0.0) for x in replayed) / max(1, len(replayed)),
             "avg_rendered_chain_count": sum(float(x.get("rendered_chain_count", 0.0) or 0.0) for x in replayed) / max(1, len(replayed)),
+            "avg_rendered_chain_sentence_count": sum(float(x.get("rendered_chain_sentence_count", 0.0) or 0.0) for x in replayed) / max(1, len(replayed)),
+            "avg_rendered_support_count": sum(float(x.get("rendered_support_count", 0.0) or 0.0) for x in replayed) / max(1, len(replayed)),
+            "avg_rendered_source_count": sum(float(x.get("rendered_source_count", 0.0) or 0.0) for x in replayed) / max(1, len(replayed)),
             "avg_support_sentence_count": sum(float(x.get("support_sentence_count", 0.0) or 0.0) for x in replayed) / max(1, len(replayed)),
             "fallback_rate": sum(float(1.0 if x.get("fallback_used") else 0.0) for x in replayed) / max(1, len(replayed)),
             "avg_dropped_sentence_count": sum(float(x.get("dropped_sentence_count", 0.0) or 0.0) for x in replayed) / max(1, len(replayed)),
+            "avg_dropped_chain_sentence_count": sum(float(x.get("dropped_chain_sentence_count", 0.0) or 0.0) for x in replayed) / max(1, len(replayed)),
+            "avg_dropped_support_count": sum(float(x.get("dropped_support_count", 0.0) or 0.0) for x in replayed) / max(1, len(replayed)),
+            "avg_dropped_source_count": sum(float(x.get("dropped_source_count", 0.0) or 0.0) for x in replayed) / max(1, len(replayed)),
             "avg_duplicate_removed_count": sum(float(x.get("duplicate_removed_count", 0.0) or 0.0) for x in replayed) / max(1, len(replayed)),
             "avg_source_removed_count": sum(float(x.get("source_removed_count", 0.0) or 0.0) for x in replayed) / max(1, len(replayed)),
             "avg_metadata_removed_count": sum(float(x.get("metadata_removed_count", 0.0) or 0.0) for x in replayed) / max(1, len(replayed)),
@@ -586,13 +640,21 @@ def main() -> None:
                 "ordering_source": args.ordering_source,
                 "avg_rendered_bundle_count": result.get("avg_rendered_bundle_count"),
                 "avg_dropped_bundle_count": result.get("avg_dropped_bundle_count"),
+                "avg_actual_context_tokens": result.get("avg_actual_context_tokens"),
+                "budget_saturated_rate": result.get("budget_saturated_rate"),
                 "token_reduction_rate": result.get("token_reduction_rate"),
                 "avg_rendered_sentence_count": result.get("avg_rendered_sentence_count"),
                 "avg_sentences_per_bundle": result.get("avg_sentences_per_bundle"),
                 "avg_rendered_chain_count": result.get("avg_rendered_chain_count"),
+                "avg_rendered_chain_sentence_count": result.get("avg_rendered_chain_sentence_count"),
+                "avg_rendered_support_count": result.get("avg_rendered_support_count"),
+                "avg_rendered_source_count": result.get("avg_rendered_source_count"),
                 "avg_support_sentence_count": result.get("avg_support_sentence_count"),
                 "fallback_rate": result.get("fallback_rate"),
                 "avg_dropped_sentence_count": result.get("avg_dropped_sentence_count"),
+                "avg_dropped_chain_sentence_count": result.get("avg_dropped_chain_sentence_count"),
+                "avg_dropped_support_count": result.get("avg_dropped_support_count"),
+                "avg_dropped_source_count": result.get("avg_dropped_source_count"),
                 "avg_duplicate_removed_count": result.get("avg_duplicate_removed_count"),
                 "avg_source_removed_count": result.get("avg_source_removed_count"),
                 "avg_metadata_removed_count": result.get("avg_metadata_removed_count"),

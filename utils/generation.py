@@ -16,6 +16,7 @@ COMPACTION_PROFILES = (
     "none",
     "chain_dedup",
     "chain_dedup_budget",
+    "full_structured_budget",
     "chain_skeleton",
     "chain_plus1",
     "sentence_cap",
@@ -532,6 +533,40 @@ def rendered_sentence_count(text: Any) -> int:
 def rendered_chain_count(text: Any) -> int:
     return sum(1 for line in str(text or "").splitlines() if line.strip().startswith(("[Evidence Chain", "Evidence Chain")))
 
+def rendered_bundle_header_count(text: Any) -> int:
+    prefixes=("[Evidence Chain","[Supporting Evidence","[Multi-Anchor Evidence","Evidence Chain","Supporting Evidence","Multi-Anchor Evidence")
+    return sum(1 for line in str(text or "").splitlines() if line.strip().startswith(prefixes))
+
+def rendered_context_role_counts(text: Any) -> dict[str,int]:
+    section="other"
+    counts={"chain_sentence_count":0,"support_sentence_count":0,"source_sentence_count":0}
+    for line in str(text or "").splitlines():
+        stripped=line.strip()
+        if not stripped:
+            section="other"
+            continue
+        if stripped.startswith("[") and stripped.endswith("]"):
+            section="support"
+            continue
+        if stripped.startswith("Chain:"):
+            section="chain"
+            continue
+        if stripped.startswith(("Supporting Propositions:","Supporting Evidence:","Support:")):
+            section="support"
+            continue
+        if stripped.startswith("Sources:"):
+            section="source"
+            continue
+        if not stripped.startswith("- "):
+            continue
+        if section=="chain":
+            counts["chain_sentence_count"]+=1
+        elif section=="source":
+            counts["source_sentence_count"]+=1
+        else:
+            counts["support_sentence_count"]+=1
+    return counts
+
 def rendered_support_sentence_count(text: Any) -> int:
     in_support=False
     count=0
@@ -658,6 +693,111 @@ def _render_structured_chain(bundles: Sequence[Mapping[str,Any]], max_chars: int
             for c in b.get("source_chunks",[]): parts.append(f"- [{c.get('title')} | {c.get('chunk_id')}] {c.get('text')}")
         parts.append("")
     return safe_truncate("\n".join(parts).strip(), max_chars)
+
+def _fits_budget(parts: Sequence[str], additions: Sequence[str], max_chars: int, token_budget: int | None) -> bool:
+    candidate="\n".join(list(parts)+list(additions)).strip()
+    if len(candidate)>int(max_chars or 24000):
+        return False
+    if token_budget is not None and token_count(candidate)>int(token_budget):
+        return False
+    return True
+
+def _append_budget_block(parts: list[str], additions: Sequence[str], max_chars: int, token_budget: int | None) -> bool:
+    clean=[str(x) for x in additions if str(x).strip() or x==""]
+    if not clean:
+        return False
+    if not _fits_budget(parts,clean,max_chars,token_budget):
+        return False
+    parts.extend(clean)
+    return True
+
+def _append_budget_item_with_label(parts: list[str], label: str, item: str, label_present: bool, max_chars: int, token_budget: int | None) -> bool:
+    additions=[item] if label_present else [label,item]
+    if _append_budget_block(parts,additions,max_chars,token_budget):
+        return True
+    return False
+
+def _render_full_structured_budget(bundles: Sequence[Mapping[str,Any]], max_chars: int, token_budget: int | None) -> str:
+    parts: list[str]=[]
+    ordered=_ordered_bundles(bundles)
+    budget=int(token_budget) if token_budget is not None else None
+    for i,b in enumerate(ordered, start=1):
+        bridge=", ".join(str(x) for x in b.get("bridge_titles",[]) or [])
+        bundle_type=str(b.get("bundle_type") or "")
+        bridge_paths=_bridge_paths(b)
+        chain_texts:set[str]=set()
+        bundle_started=False
+        if bundle_type=="multi_anchor":
+            anchors="; ".join(str(x) for x in b.get("anchor_titles",[]) or [])
+            header=[f"[Multi-Anchor Evidence {i} | anchors={anchors} | complete={bool(b.get('multi_anchor_complete'))}]"]
+            if not _append_budget_block(parts,header,max_chars,budget):
+                continue
+            bundle_started=True
+            seen=set()
+            appended=False
+            for p in b.get("propositions",[]) or []:
+                title=str(p.get("title") or "")
+                text=str(p.get("text") or "")
+                key=(title,text)
+                if not title or not text or key in seen:
+                    continue
+                seen.add(key)
+                appended=_append_budget_block(parts,[f"- {title}: {text}"],max_chars,budget) or appended
+            if not appended:
+                for c in b.get("source_chunks",[]) or []:
+                    title=str(c.get("title") or "")
+                    text=str(c.get("text") or "")
+                    if title and text:
+                        _append_budget_block(parts,[f"- {title}: {text}"],max_chars,budget)
+            _append_budget_block(parts,[""],max_chars,budget)
+            continue
+        if bridge_paths:
+            header=[
+                f"[Evidence Chain {i} | anchor_connected={bool(b.get('anchor_connected'))} | chain_complete_v2={bool(b.get('chain_complete_v2',b.get('chain_complete')))} | score={b.get('score')}]",
+                f"Anchor: {b.get('anchor_title')}",
+            ]
+            if bridge:
+                header.append(f"Bridge: {bridge}")
+            header.append("Chain:")
+            if not _append_budget_block(parts,header,max_chars,budget):
+                continue
+            bundle_started=True
+            for path in bridge_paths[:4]:
+                for title_key,text_key in (("source_title","seed_prop"),("bridge_title","bridge_prop")):
+                    text=str(path.get(text_key) or "")
+                    if not text or any(text==seen or text in seen for seen in chain_texts):
+                        continue
+                    item=f"- {path.get(title_key)}: {text}"
+                    if _append_budget_block(parts,[item],max_chars,budget):
+                        chain_texts.add(text)
+        else:
+            header=[
+                f"[Supporting Evidence {i} | anchor={b.get('anchor_title')} | relation_title={bool(b.get('is_relation_title_bundle'))} | score={b.get('score')}]"
+            ]
+            if b.get("anchor_title"):
+                header.append(f"Anchor: {b.get('anchor_title')}")
+            if not _append_budget_block(parts,header,max_chars,budget):
+                continue
+            bundle_started=True
+        support_label=False
+        for p in b.get("propositions",[]) or []:
+            text=str(p.get("text") or "")
+            if not text or any(text==seen or text in seen for seen in chain_texts):
+                continue
+            item=f"- ({p.get('prop_id')} | {p.get('title')}) {text}"
+            if _append_budget_item_with_label(parts,"Supporting Propositions:",item,support_label,max_chars,budget):
+                support_label=True
+        source_label=False
+        for c in b.get("source_chunks",[]) or []:
+            text=str(c.get("text") or "")
+            if not text:
+                continue
+            item=f"- [{c.get('title')} | {c.get('chunk_id')}] {text}"
+            if _append_budget_item_with_label(parts,"Sources:",item,source_label,max_chars,budget):
+                source_label=True
+        if bundle_started:
+            _append_budget_block(parts,[""],max_chars,budget)
+    return "\n".join(parts).strip()
 
 def _render_plain_evidence(bundles: Sequence[Mapping[str,Any]], max_chars: int) -> str:
     parts=[]
@@ -1244,8 +1384,11 @@ def _render_compacted_context(
     max_chars: int,
     compaction_profile: str,
     max_sentences_per_bundle: int = 3,
+    token_budget: int | None = None,
 ) -> str:
     profile=str(compaction_profile or "none")
+    if profile=="full_structured_budget":
+        return _render_full_structured_budget(bundles,max_chars,token_budget)
     if profile=="metadata_only_compact":
         return _render_metadata_only_compact(bundles,max_chars)
     if profile=="chain_dedup":
@@ -1298,7 +1441,7 @@ def render_context(
     if token_budget:
         char_budget=min(char_budget, int(token_budget)*6)
     if compact!="none":
-        return _render_compacted_context(evidence_bundles,char_budget,compact,max_sentences_per_bundle=max_sentences_per_bundle)
+        return _render_compacted_context(evidence_bundles,char_budget,compact,max_sentences_per_bundle=max_sentences_per_bundle,token_budget=token_budget)
     if profile=="structured_chain":
         return _render_structured_chain(evidence_bundles,char_budget)
     if profile=="plain_evidence":
@@ -1327,12 +1470,20 @@ def render_context_with_metadata(
         max_sentences_per_bundle=max_sentences_per_bundle,
     )
     rendered_stats=bundle_sentence_statistics(evidence_bundles,context)
+    role_counts=rendered_context_role_counts(context)
     stats=dict(rendered_stats)
     compact=str(compaction_profile or "none")
     no_sources="no_sources" in compact or "schema" in compact
     stats.update({
         "original_sentence_count":original_stats.get("rendered_sentence_count",0),
         "dropped_sentence_count":max(0,int(original_stats.get("rendered_sentence_count",0) or 0)-int(rendered_stats.get("rendered_sentence_count",0) or 0)),
+        "rendered_bundle_count":rendered_bundle_header_count(context),
+        "rendered_chain_sentence_count":role_counts.get("chain_sentence_count",0),
+        "rendered_support_count":role_counts.get("support_sentence_count",0),
+        "rendered_source_count":role_counts.get("source_sentence_count",0),
+        "dropped_chain_sentence_count":max(0,int(original_stats.get("chain_sentence_count",0) or 0)-int(role_counts.get("chain_sentence_count",0) or 0)),
+        "dropped_support_count":max(0,int(original_stats.get("support_sentence_count",0) or 0)-int(role_counts.get("support_sentence_count",0) or 0)),
+        "dropped_source_count":max(0,int(original_stats.get("source_sentence_count",0) or 0)-int(role_counts.get("source_sentence_count",0) or 0)),
         "duplicate_removed_count":max(0,int(original_stats.get("duplicate_sentence_count",0) or 0)-int(rendered_stats.get("duplicate_sentence_count",0) or 0)),
         "source_removed_count":int(original_stats.get("source_sentence_count",0) or 0) if no_sources else 0,
         "metadata_removed_count":_metadata_removed_count(evidence_bundles) if compact!="none" else 0,
