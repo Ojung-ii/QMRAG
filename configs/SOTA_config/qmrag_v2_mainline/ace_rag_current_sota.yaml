@@ -1,0 +1,161 @@
+name: ace_rag_current_sota
+created_at: "2026-05-26"
+code_commit: bdf1d59b7f2847a7b3a7906260ebc348c5c44a92
+status: current_paper_sota_snapshot
+summary:
+  main_common_prompt: common_qa + r0_current structured_chain + top3_chain_dedup
+  native_appendix: p8_r0_section_aware + r0_current structured_chain + top8
+  note: Includes the late-night rendering/prompt improvements used by the final paper tables.
+
+models:
+  generator: Qwen/Qwen2.5-7B-Instruct
+  generator_endpoint: openai_compatible_vllm
+  embedding_model: nvidia/NV-Embed-v2
+  embedding_model_path: /home/dilab/.cache/huggingface/models--nvidia--NV-Embed-v2/snapshots/3fa59658547db50a1e8e3346cf057fd0c77ed6ef/
+
+vllm_reference_command: >-
+  CUDA_VISIBLE_DEVICES=0 conda run -n vllm vllm serve Qwen/Qwen2.5-7B-Instruct
+  --host 127.0.0.1 --port 8013 --gpu-memory-utilization 0.55
+  --max-model-len 16384 --api-key EMPTY
+
+retrieval_base:
+  retrieval_variant: full_hetero
+  seed_selection_variant: top_relevance
+  candidate_pool_size: default_full
+  rendering_profile: structured_chain
+  bridge:
+    enabled: true
+    selection: residual_lexical
+    ordering: anchor_chain_aware
+    anchor_constrained: true
+    multi_anchor_bundle: true
+    demote_generic_relation_titles: true
+  prediction_postprocessing: standard_qa_normalization_only
+  no_idk_to_insufficient_conversion: true
+
+main_common_prompt_sota:
+  method_name: ACE-RAG-Compact
+  config_file: configs/SOTA_config/qmrag_v2_mainline/qmrag_v2_common_top3.yaml
+  prompt_profile: common_qa
+  compaction_profile: top3_chain_dedup
+  top_bundles: 3
+  context: compact_replay_from_full_common_retrieval
+  role: main_controlled_common_prompt_result
+  ace_renderer_variant: r0_current
+  rendering_improvement_status: final_common_prompt_renderer
+  reproduction_commands:
+    - source configs/SOTA_config/qmrag_v2_mainline/env.example
+    - bash configs/SOTA_config/qmrag_v2_mainline/run_qmrag_v2_mainline.sh
+    - LIMIT=1000 bash configs/SOTA_config/qmrag_v2_mainline/run_qmrag_v2_compact_ablation.sh
+  source_outputs:
+    hotpotqa: outputs/replay/20260525_144934/hotpotqa/common_qa_to_common_qa_top3_top3_chain_dedup/predictions.jsonl
+    2wiki: outputs/replay/20260525_144906/2wiki/common_qa_to_common_qa_top3_top3_chain_dedup/predictions.jsonl
+    musique: outputs/replay/20260525_144927/musique/common_qa_to_common_qa_top3_top3_chain_dedup/predictions.jsonl
+    popqa: outputs/replay/20260525_144908/popqa/common_qa_to_common_qa_top3_top3_chain_dedup/predictions.jsonl
+  results_n1000:
+    hotpotqa:
+      recall_at_5: 0.970
+      em: 0.309
+      f1: 0.379
+      context_tokens: 458.2
+      input_tokens: 593.4
+      retrieval_ms: 447.2
+      generation_ms: 85.2
+      total_ms: 532.4
+    2wikimultihopqa:
+      recall_at_5: 0.881
+      em: 0.115
+      f1: 0.143
+      context_tokens: 462.1
+      input_tokens: 593.0
+      retrieval_ms: 254.8
+      generation_ms: 81.6
+      total_ms: 336.4
+    musique:
+      recall_at_5: 0.757
+      em: 0.051
+      f1: 0.070
+      context_tokens: 592.2
+      input_tokens: 727.6
+      retrieval_ms: 287.7
+      generation_ms: 85.7
+      total_ms: 373.4
+    popqa:
+      recall_at_5: 0.561
+      em: 0.389
+      f1: 0.476
+      context_tokens: 436.3
+      input_tokens: 560.0
+      retrieval_ms: 120.6
+      generation_ms: 80.6
+      total_ms: 201.2
+
+native_prompt_appendix_sota:
+  method_name: ACE-RAG
+  prompt_profile: acerag_native_p8_r0_section_aware
+  prompt_alias: p8_r0_section_aware
+  predecessor_prompt_checked_at_dawn: p2_relaxed_chain
+  final_prompt_improvement: section_aware_native_prompt
+  ace_renderer_variant: r0_current
+  renderer_alias: r0_current
+  top_k: 8
+  context: top8_structured_chain_section_aware
+  role: appendix_method_prompt_result
+  timing_note: controlled_sequential_gpu0_vllm_gpu_memory_utilization_0.55
+  final_table_source: outputs/final_baseline_aware/20260526_053914/final_native_prompt_expanded_table.md
+  controlled_timing_source: outputs/native_timing_controlled/20260526_gpu0_seq055_native_top8
+  reproduction_commands:
+    - export BASE_URL=http://127.0.0.1:8013/v1
+    - export RUN_ID=20260526_gpu0_seq055_native_top8
+    - python scripts/run_hotpotqa_f1_sprint.py --input-predictions-jsonl outputs/acerag_native_final_verification/20260526_034219/appendix_4ds_p2_top8_n1000/hotpotqa/p2_relaxed_chain_top8/predictions.jsonl --dataset hotpotqa --stage-name hotpotqa_native_p8_top8_gpu0_seq --prompt-variants p8_r0_section_aware --renderer-variant r0_current --top-k 8 --context-field rendered_context --question-field question --gold-field gold_answer --output-root outputs/native_timing_controlled --run-id 20260526_gpu0_seq055_native_top8 --base-urls http://127.0.0.1:8013/v1 --api-key EMPTY --model auto --max-output-tokens 64 --temperature 0 --top-p 1 --max-concurrency 1 --progress-every 100
+    - python scripts/run_hotpotqa_f1_sprint.py --input-predictions-jsonl outputs/acerag_native_final_verification/20260526_034219/appendix_4ds_p2_top8_n1000/2wiki/p2_relaxed_chain_top8/predictions.jsonl --dataset 2wikimultihopqa --stage-name 2wiki_native_p8_top8_gpu0_seq --prompt-variants p8_r0_section_aware --renderer-variant r0_current --top-k 8 --context-field rendered_context --question-field question --gold-field gold_answer --output-root outputs/native_timing_controlled --run-id 20260526_gpu0_seq055_native_top8 --base-urls http://127.0.0.1:8013/v1 --api-key EMPTY --model auto --max-output-tokens 64 --temperature 0 --top-p 1 --max-concurrency 1 --progress-every 100
+    - python scripts/run_hotpotqa_f1_sprint.py --input-predictions-jsonl outputs/acerag_native_final_verification/20260526_034219/appendix_4ds_p2_top8_n1000/musique/p2_relaxed_chain_top8/predictions.jsonl --dataset musique --stage-name musique_native_p8_top8_gpu0_seq --prompt-variants p8_r0_section_aware --renderer-variant r0_current --top-k 8 --context-field rendered_context --question-field question --gold-field gold_answer --output-root outputs/native_timing_controlled --run-id 20260526_gpu0_seq055_native_top8 --base-urls http://127.0.0.1:8013/v1 --api-key EMPTY --model auto --max-output-tokens 64 --temperature 0 --top-p 1 --max-concurrency 1 --progress-every 100
+    - python scripts/run_hotpotqa_f1_sprint.py --input-predictions-jsonl outputs/acerag_native_final_verification/20260526_034219/appendix_4ds_p2_top8_n1000/popqa/p2_relaxed_chain_top8/predictions.jsonl --dataset popqa --stage-name popqa_native_p8_top8_gpu0_seq --prompt-variants p8_r0_section_aware --renderer-variant r0_current --top-k 8 --context-field rendered_context --question-field question --gold-field gold_answer --output-root outputs/native_timing_controlled --run-id 20260526_gpu0_seq055_native_top8 --base-urls http://127.0.0.1:8013/v1 --api-key EMPTY --model auto --max-output-tokens 64 --temperature 0 --top-p 1 --max-concurrency 1 --progress-every 100
+  source_outputs:
+    hotpotqa: outputs/native_timing_controlled/20260526_gpu0_seq055_native_top8/hotpotqa_native_p8_top8_gpu0_seq/p8_r0_section_aware/predictions.jsonl
+    2wikimultihopqa: outputs/native_timing_controlled/20260526_gpu0_seq055_native_top8/2wiki_native_p8_top8_gpu0_seq/p8_r0_section_aware/predictions.jsonl
+    musique: outputs/native_timing_controlled/20260526_gpu0_seq055_native_top8/musique_native_p8_top8_gpu0_seq/p8_r0_section_aware/predictions.jsonl
+    popqa: outputs/native_timing_controlled/20260526_gpu0_seq055_native_top8/popqa_native_p8_top8_gpu0_seq/p8_r0_section_aware/predictions.jsonl
+  results_n1000:
+    hotpotqa:
+      recall_at_5: 0.970
+      em: 0.5040
+      f1: 0.6339
+      context_tokens: 687.2
+      input_tokens: 985.4
+      retrieval_ms: 447.2
+      generation_ms: 88.1
+      total_ms: 535.3
+    2wikimultihopqa:
+      recall_at_5: 0.8812
+      em: 0.3600
+      f1: 0.4337
+      context_tokens: 699.2
+      input_tokens: 993.2
+      retrieval_ms: 254.8
+      generation_ms: 85.9
+      total_ms: 340.7
+    musique:
+      recall_at_5: 0.7572
+      em: 0.1970
+      f1: 0.2768
+      context_tokens: 900.6
+      input_tokens: 1199.0
+      retrieval_ms: 463.4
+      generation_ms: 94.3
+      total_ms: 557.7
+    popqa:
+      recall_at_5: 0.5615
+      em: 0.4680
+      f1: 0.5984
+      context_tokens: 729.9
+      input_tokens: 1016.6
+      retrieval_ms: 227.8
+      generation_ms: 85.7
+      total_ms: 313.5
+
+notes:
+  - Main paper comparison should use main_common_prompt_sota, not method-prompt numbers.
+  - Native prompt results are appendix/end-to-end ablations.
+  - Full common structured_chain retrieval remains the source run for compact replay.
+  - Do not commit outputs, logs, data, cache, zip files, pyc files, or embedding indexes.

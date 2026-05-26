@@ -4,9 +4,20 @@
 
 This directory freezes the reproducible QMRAG v2 mainline and its paper-facing ablations. It does not change retrieval logic, ranking, prompts, or prediction post-processing. It only records the selected settings and provides scripts to rerun them.
 
-## Mainline Setting
+## Current Paper SOTA Snapshot
 
-Main result uses `common_qa` + `structured_chain` + full context.
+The current paper-facing SOTA snapshot is recorded in
+`ace_rag_current_sota.yaml`.
+
+- Main controlled comparison: `ACE-RAG-Compact = common_qa + r0_current structured_chain + top3_chain_dedup`.
+- Native appendix result: `ACE-RAG native = p8_r0_section_aware + r0_current structured_chain + top8`.
+- The earlier dawn prompt check `p2_relaxed_chain` is kept as an intermediate
+  verification/source-context run, not as the final native SOTA setting.
+
+## Full Retrieval Source Setting
+
+The compact common-prompt result is replayed from the full common retrieval
+source. That source uses `common_qa` + `structured_chain` + full context.
 
 - `retrieval_variant`: `full_hetero`
 - `seed_selection_variant`: `top_relevance`
@@ -19,8 +30,10 @@ Main result uses `common_qa` + `structured_chain` + full context.
 - `top_bundles`: unset
 - `context_token_budget`: unset
 
-This remains the primary fair-comparison mainline. The compact result is a
-paper-facing efficiency setting, not a replacement for the main SOTA row.
+This full source remains the retrieval/evidence source for compact replay. The
+paper main common-prompt row should report the compact top-3 rendering because
+it beats the best common-prompt baseline on all four datasets with the shortest
+context.
 
 Run:
 
@@ -37,14 +50,14 @@ QMRAG-bundle is an ablation/upper-bound for structured evidence utilization. It 
 bash configs/SOTA_config/qmrag_v2_mainline/run_qmrag_v2_prompt_ablation.sh
 ```
 
-## Compact Efficiency Ablation
+## Main Common-Prompt Compact Setting
 
-The paper-facing compact setting is `top3_chain_dedup + common_qa` across all
-datasets. This is the recommended QMRAG-Compact-common result because the n=1000
-run beats the best common-prompt baseline on all four datasets while keeping
-`InputTok <= 800`. It is not the primary fair-comparison mainline. The script
-uses `replay_generation.py` so retrieval is not rerun and
-`evidence_bundles_hash_match_rate` should remain `1.0`.
+The main paper setting is `top3_chain_dedup + common_qa` across all datasets.
+This is the recommended `ACE-RAG-Compact` common-prompt result because the
+n=1000 run beats the best common-prompt baseline on all four datasets while
+keeping the shortest context. The script uses `replay_generation.py` so
+retrieval is not rerun and `evidence_bundles_hash_match_rate` should remain
+`1.0`.
 
 ```bash
 bash configs/SOTA_config/qmrag_v2_mainline/run_qmrag_v2_compact_ablation.sh
@@ -73,6 +86,12 @@ bash configs/SOTA_config/qmrag_v2_mainline/run_qmrag_v2_mainline.sh --dry-run
 bash configs/SOTA_config/qmrag_v2_mainline/run_qmrag_v2_prompt_ablation.sh --dry-run
 bash configs/SOTA_config/qmrag_v2_mainline/run_qmrag_v2_compact_ablation.sh --dry-run
 bash configs/SOTA_config/qmrag_v2_mainline/run_qmrag_v2_runtime_ablation.sh --dry-run
+```
+
+Final SOTA snapshot:
+
+```bash
+cat configs/SOTA_config/qmrag_v2_mainline/ace_rag_current_sota.yaml
 ```
 
 Limit override:
@@ -104,12 +123,16 @@ Replay ablations write under `outputs/replay/{timestamp}/{dataset}/...`.
 
 - Do not change `common_qa` for main fair-comparison runs.
 - Do not use QMRAG-bundle as the main fair-comparison result.
-- Do not replace the primary full-context mainline with compact results in the
-  main SOTA table; report QMRAG-Compact-common as an efficiency result.
+- Do not report method-specific/native prompt rows as the main controlled
+  comparison.
+- Do not use `p2_relaxed_chain` as the final native SOTA; use
+  `p8_r0_section_aware + r0_current + top8`.
 - Do not use dataset-specific caps or context settings.
 - Do not commit `outputs/`, `data/`, `cache/`, `logs/`, zip files, pyc files, or `__pycache__/`.
 - Do not add full KG/OpenIE/PPR/keyword embedding features to this config pack.
 
 ## Reported Result Sources
 
-See `reported_results_n1000.md` for n=1000 tables and source output paths. See `manifest.json` for the frozen settings, source paths, and config hashes.
+See `ace_rag_current_sota.yaml` for the current frozen SOTA settings. See
+`reported_results_n1000.md` for n=1000 tables and source output paths. See
+`manifest.json` for config hashes and source paths.

@@ -15,10 +15,10 @@ sota_config:
   top_bundles: 3
   compaction_profile: top3_chain_dedup
   context_token_budget: null
-  mainline_status: paper_compact_candidate
+  mainline_status: main_common_prompt_sota
   notes:
-    - Paper-facing QMRAG-Compact-common efficiency profile.
+    - Paper-facing ACE-RAG-Compact common-prompt SOTA profile.
     - Uses the same evidence_bundles as full common mainline; only rendered_context is compacted.
     - Implement with replay_generation.py --compaction-profile top3_chain_dedup to avoid rerunning retrieval.
     - Outperforms the best common-prompt baseline on all four n=1000 datasets with InputTok <= 800.
-    - This is not the primary fair-comparison mainline; full common remains the main result.
+    - This is the main controlled common-prompt row; method-specific/native prompts are appendix ablations.

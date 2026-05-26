@@ -6,8 +6,9 @@ prompt ablation.
 
 ## Main Common Prompt
 
-`common_qa` is the primary fair-comparison setting. It uses `structured_chain`
-rendering and full context. This remains the main SOTA row.
+`common_qa` is the primary fair-comparison prompt. The paper main row reports
+`ACE-RAG-Compact`, which replays the full common retrieval source with
+`top3_chain_dedup` rendering.
 
 | Dataset | n | EM | F1 | Ans in Context | Ans in Pred | Insufficient | CtxTok | InputTok | TotalTok | EffectiveMs | Source |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
@@ -16,9 +17,9 @@ rendering and full context. This remains the main SOTA row.
 | popqa | 1000 | 0.405 | 0.5051 | 0.886 | 0.603 | 0.289 | 1724.3 | 1847.2 | 1851.7 | 440.1 | `outputs/popqa/eval/20260525_095722_core_ablation_5proc_popqa_core_qmrag_mainline_n1000/predictions.jsonl` |
 | musique | 1000 | 0.070 | 0.0917 | 0.636 | 0.106 | 0.860 | 2289.0 | 2423.5 | 2427.7 | 673.9 | `outputs/musique/eval/20260525_095722_core_ablation_5proc_musique_core_qmrag_mainline_n1000/predictions.jsonl` |
 
-## QMRAG-Compact-common
+## ACE-RAG-Compact Common SOTA
 
-The paper-facing compact efficiency candidate is `top3_chain_dedup + common_qa`.
+The paper-facing common-prompt SOTA is `top3_chain_dedup + common_qa`.
 It is a replay experiment: retrieval and `evidence_bundles` are unchanged, only
 `rendered_context` is compacted. All rows have
 `evidence_bundles_hash_match_rate=1.0`.
@@ -43,6 +44,19 @@ recommended paper-facing compact profile.
 | chain_dedup | 0.2758 | +0.0533 | 885.6 | 0.3246 | 53.7% | backup compact candidate |
 | top3_chain_dedup | 0.2648 | +0.0423 | 620.9 | 0.4528 | 68.0% | QMRAG-Compact-common candidate |
 
+## Native Prompt / Rendering SOTA
+
+The final native appendix setting uses the late-night prompt/rendering update:
+`p8_r0_section_aware + r0_current + top8`. The earlier `p2_relaxed_chain` run is
+kept as an intermediate verification, not the final native SOTA.
+
+| Dataset | n | Prompt | TopK | EM | F1 | Recall@5 | CtxTok | InputTok | Ret. ms | Gen. ms | Source |
+| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| hotpotqa | 1000 | p8_r0_section_aware | 8 | 0.5040 | 0.6339 | 0.9700 | 687.2 | 985.4 | 447.2 | 88.1 | `outputs/native_timing_controlled/20260526_gpu0_seq055_native_top8/hotpotqa_native_p8_top8_gpu0_seq/p8_r0_section_aware/predictions.jsonl` |
+| 2wikimultihopqa | 1000 | p8_r0_section_aware | 8 | 0.3600 | 0.4337 | 0.8812 | 699.2 | 993.2 | 254.8 | 85.9 | `outputs/native_timing_controlled/20260526_gpu0_seq055_native_top8/2wiki_native_p8_top8_gpu0_seq/p8_r0_section_aware/predictions.jsonl` |
+| musique | 1000 | p8_r0_section_aware | 8 | 0.1970 | 0.2768 | 0.7572 | 900.6 | 1199.0 | 463.4 | 94.3 | `outputs/native_timing_controlled/20260526_gpu0_seq055_native_top8/musique_native_p8_top8_gpu0_seq/p8_r0_section_aware/predictions.jsonl` |
+| popqa | 1000 | p8_r0_section_aware | 8 | 0.4680 | 0.5984 | 0.5615 | 729.9 | 1016.6 | 227.8 | 85.7 | `outputs/native_timing_controlled/20260526_gpu0_seq055_native_top8/popqa_native_p8_top8_gpu0_seq/p8_r0_section_aware/predictions.jsonl` |
+
 ## Prompt Ablation
 
 Method/native prompt results are prompt ablations and should be reported in an
@@ -58,8 +72,8 @@ appendix or separate native-prompt table, not as the main fair-comparison row.
 
 ## Interpretation
 
-- Primary mainline remains `common_qa + structured_chain + full context`.
-- `QMRAG-Compact-common` should use `top3_chain_dedup + common_qa`.
+- Primary controlled common-prompt row is `ACE-RAG-Compact = common_qa + top3_chain_dedup`.
+- Native appendix row is `p8_r0_section_aware + r0_current + top8`.
 - `top3_chain_dedup + common_qa` beats the best common-prompt baseline on all
   four datasets while keeping `InputTok <= 800`.
 - The compact quality drop is mostly evidence loss from context pruning, not a
@@ -67,7 +81,6 @@ appendix or separate native-prompt table, not as the main fair-comparison row.
 - `strict_short_qa` improves over `common_qa` on all four datasets.
 - `qmrag_bundle_short_qa` improves the existing bundle prompt on three of four
   datasets and improves the average, but remains a method-prompt ablation.
-- Compact latency should not be claimed from this replay run; recorded
-  generation timing is affected by concurrent vLLM load. The robust claim is
-  token efficiency plus baseline-beating F1.
+- Native generation timing should use the controlled GPU0 sequential rerun
+  under `outputs/native_timing_controlled/20260526_gpu0_seq055_native_top8`.
 - No dataset-specific settings are used in the mainline or compact candidate.
