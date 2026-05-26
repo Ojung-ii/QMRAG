@@ -1,0 +1,19 @@
+extends: ../default.yaml
+
+generation:
+  prompt_profile: common_qa
+  rendering_profile: structured_chain
+
+retrieval:
+  retrieval_variant: full_hetero
+  seed_selection_variant: medoid_current
+  candidate_cap:
+    enabled: true
+    total_candidates: 40
+    title_candidates: null
+    chunk_candidates: null
+    proposition_candidates: null
+  bridge:
+    enabled: true
+    selection: residual_lexical
+    ordering: anchor_chain_aware

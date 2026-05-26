@@ -1,0 +1,22 @@
+extends: ../default.yaml
+
+run:
+  ablation_variant: core_qmrag_mainline
+  enable_timing: true
+
+generation:
+  prompt_profile: common_qa
+  rendering_profile: structured_chain
+  compaction_profile: top3_chain_dedup
+
+retrieval:
+  retrieval_variant: full_hetero
+  seed_selection_variant: top_relevance
+  residual_selection: residual_lexical
+  candidate_cap:
+    enabled: false
+  bridge:
+    enabled: true
+    selection: residual_lexical
+    ordering: anchor_chain_aware
+    multi_anchor_bundle: true

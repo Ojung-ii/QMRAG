@@ -1,0 +1,150 @@
+{
+  "name": "qmrag_v2_mainline",
+  "purpose": "SOTA/reproducibility config pack for QMRAG v2",
+  "created_at": "2026-05-24T22:18:08+0900",
+  "base_commit": "75cb7a42dd7406ec76462459fe40d745156fe739",
+  "current_sota_snapshot_file": "ace_rag_current_sota.yaml",
+  "current_paper_sota": {
+    "main_common_prompt": "ACE-RAG-Compact = common_qa + r0_current structured_chain + top3_chain_dedup",
+    "native_appendix": "ACE-RAG native = p8_r0_section_aware + r0_current structured_chain + top8",
+    "updated_at": "2026-05-26"
+  },
+  "mainline_setting": {
+    "retrieval_variant": "full_hetero",
+    "seed_selection_variant": "top_relevance",
+    "candidate_pool_size": "default/full",
+    "rendering_profile": "structured_chain",
+    "prompt_profile": "common_qa",
+    "context": "full",
+    "top_bundles": null,
+    "context_token_budget": null,
+    "bridge_enabled": true,
+    "bridge_selection": "residual_lexical",
+    "ordering": "anchor_chain_aware",
+    "anchor_constrained": true,
+    "multi_anchor_bundle": true,
+    "demote_generic_relation_titles": true,
+    "prediction_postprocessing": "unchanged"
+  },
+  "paper_compact_setting": {
+    "name": "QMRAG-Compact-common",
+    "retrieval_variant": "full_hetero",
+    "source_prompt_profile": "common_qa",
+    "source_rendering_profile": "structured_chain",
+    "target_prompt_profile": "common_qa",
+    "compaction_profile": "top3_chain_dedup",
+    "top_bundles": 3,
+    "context": "compact_replay",
+    "evidence_bundles": "unchanged",
+    "rendered_context": "compacted",
+    "prediction_postprocessing": "unchanged",
+    "status": "main_common_prompt_sota",
+    "primary_mainline_replacement": true
+  },
+  "native_appendix_setting": {
+    "name": "ACE-RAG-native-p8-top8",
+    "retrieval_variant": "full_hetero",
+    "prompt_variant": "p8_r0_section_aware",
+    "prompt_profile": "acerag_native_p8_r0_section_aware",
+    "renderer_variant": "r0_current",
+    "top_k": 8,
+    "context": "top8_structured_chain_section_aware",
+    "status": "appendix_method_prompt_sota",
+    "controlled_timing_source": "outputs/native_timing_controlled/20260526_gpu0_seq055_native_top8"
+  },
+  "ablation_settings": {
+    "bundle_prompt": "qmrag_bundle_qa",
+    "compact_common_profile": "top3_chain_dedup",
+    "compact_top_bundles": 3,
+    "strict_short_prompt": "strict_short_qa",
+    "bundle_short_prompt": "qmrag_bundle_short_qa",
+    "runtime_candidate_pool_size": 60
+  },
+  "datasets": [
+    "hotpotqa",
+    "2wiki",
+    "popqa",
+    "musique"
+  ],
+  "models": {
+    "llm_endpoint": "http://localhost:8013/v1",
+    "llm_model": "Qwen/Qwen2.5-7B-Instruct",
+    "vllm_reference": "CUDA_VISIBLE_DEVICES=0, gpu_memory_utilization=0.55, max_model_len=16384",
+    "embedding_model_path": "/home/dilab/.cache/huggingface/models--nvidia--NV-Embed-v2/snapshots/3fa59658547db50a1e8e3346cf057fd0c77ed6ef/"
+  },
+  "config_hashes_sha256": {
+    "ace_rag_current_sota.yaml": "8616acd330ae51eb4de2a649f85254c59d81fc6cf07356688c019f1d0cc8c594",
+    "qmrag_v2_common_full.yaml": "6cafc007f55c65557df61ca96e9218df9b28da6ffc16b63c1d73b00c6675fad5",
+    "qmrag_v2_bundle_full.yaml": "806794ee23796260e0fb92f0d295010131be4fad21a7ed72d1e50ced112c9ba1",
+    "qmrag_v2_common_top3.yaml": "103df7ed1700ef779a3f0565fbc9d18c89675ea01f9e4851cc568e99d8a7fefa",
+    "qmrag_v2_bundle_top3.yaml": "82fe80e698a63138a7615979f6e208e709a84f2886bdfd361666b17a889ab66f",
+    "qmrag_v2_runtime_cap60.yaml": "662f86225f14e9b50c244557bb86234b7869b678307b570a657fcb1d9c6fd5af"
+  },
+  "reported_result_sources": {
+    "common_full": {
+      "hotpotqa": "outputs/hotpotqa/eval/20260525_095722_core_ablation_5proc_hotpotqa_core_qmrag_mainline_n1000/predictions.jsonl",
+      "2wiki": "outputs/2wiki/eval/20260525_095722_core_ablation_5proc_2wiki_core_qmrag_mainline_n1000/predictions.jsonl",
+      "popqa": "outputs/popqa/eval/20260525_095722_core_ablation_5proc_popqa_core_qmrag_mainline_n1000/predictions.jsonl",
+      "musique": "outputs/musique/eval/20260525_095722_core_ablation_5proc_musique_core_qmrag_mainline_n1000/predictions.jsonl"
+    },
+    "bundle_full": {
+      "hotpotqa": "outputs/hotpotqa/eval/20260524_231958_sota_timing_bundle_native/predictions.jsonl",
+      "2wiki": "outputs/2wiki/eval/20260524_231958_sota_timing_bundle_native/predictions.jsonl",
+      "popqa": "outputs/popqa/eval/20260524_231958_sota_timing_bundle_native/predictions.jsonl",
+      "musique": "outputs/musique/eval/20260524_231958_sota_timing_bundle_native/predictions.jsonl"
+    },
+    "common_compact_top3_chain_dedup": {
+      "hotpotqa": "outputs/replay/20260525_144934/hotpotqa/common_qa_to_common_qa_top3_top3_chain_dedup/predictions.jsonl",
+      "2wiki": "outputs/replay/20260525_144906/2wiki/common_qa_to_common_qa_top3_top3_chain_dedup/predictions.jsonl",
+      "popqa": "outputs/replay/20260525_144908/popqa/common_qa_to_common_qa_top3_top3_chain_dedup/predictions.jsonl",
+      "musique": "outputs/replay/20260525_144927/musique/common_qa_to_common_qa_top3_top3_chain_dedup/predictions.jsonl"
+    },
+    "native_p8_r0_section_aware_top8_controlled": {
+      "hotpotqa": "outputs/native_timing_controlled/20260526_gpu0_seq055_native_top8/hotpotqa_native_p8_top8_gpu0_seq/p8_r0_section_aware/predictions.jsonl",
+      "2wikimultihopqa": "outputs/native_timing_controlled/20260526_gpu0_seq055_native_top8/2wiki_native_p8_top8_gpu0_seq/p8_r0_section_aware/predictions.jsonl",
+      "musique": "outputs/native_timing_controlled/20260526_gpu0_seq055_native_top8/musique_native_p8_top8_gpu0_seq/p8_r0_section_aware/predictions.jsonl",
+      "popqa": "outputs/native_timing_controlled/20260526_gpu0_seq055_native_top8/popqa_native_p8_top8_gpu0_seq/p8_r0_section_aware/predictions.jsonl"
+    },
+    "strict_short_prompt_full": {
+      "hotpotqa": "outputs/replay/20260525_142121/hotpotqa/common_qa_to_strict_short_qa/predictions.jsonl",
+      "2wiki": "outputs/replay/20260525_142110/2wiki/common_qa_to_strict_short_qa/predictions.jsonl",
+      "popqa": "outputs/replay/20260525_142105/popqa/common_qa_to_strict_short_qa/predictions.jsonl",
+      "musique": "outputs/replay/20260525_142054/musique/common_qa_to_strict_short_qa/predictions.jsonl"
+    },
+    "bundle_short_prompt_full": {
+      "hotpotqa": "outputs/replay/20260525_142133/hotpotqa/common_qa_to_qmrag_bundle_short_qa/predictions.jsonl",
+      "2wiki": "outputs/replay/20260525_143451/2wiki/common_qa_to_qmrag_bundle_short_qa/predictions.jsonl",
+      "popqa": "outputs/replay/20260525_143441/popqa/common_qa_to_qmrag_bundle_short_qa/predictions.jsonl",
+      "musique": "outputs/replay/20260525_143415/musique/common_qa_to_qmrag_bundle_short_qa/predictions.jsonl"
+    },
+    "seed_top_relevance_n1000": {
+      "hotpotqa": "outputs/hotpotqa/eval/20260524_204859_hotpotqa_seed_top_relevance_n1000/predictions.jsonl",
+      "2wiki": "outputs/2wiki/eval/20260524_213408_2wiki_seed_top_relevance_n1000/predictions.jsonl"
+    },
+    "retrieval_metrics_analysis": {
+      "latest_generated_at": "outputs/analysis/20260524_221653"
+    },
+    "prompt_compare_analysis": {
+      "latest_generated_at": "outputs/analysis/20260524_221712"
+    },
+    "common_compact_short_prompt_analysis": {
+      "latest_generated_at": "outputs/analysis/20260525_145143"
+    }
+  },
+  "reported_source_caveats": {
+    "all_datasets": "common_full uses the 2026-05-25 n=1000 core_qmrag_mainline sources used for the compact replay.",
+    "compact": "common_compact_top3_chain_dedup is a replay result; retrieval/evidence_bundles are unchanged and evidence_bundles_hash_match_rate=1.0.",
+    "prompt_ablation": "strict_short_qa, qmrag_bundle_short_qa, and p2_relaxed_chain are prompt ablations/intermediate checks and are not main fair-comparison rows.",
+    "native": "Use p8_r0_section_aware + r0_current + top8 for the final native appendix setting."
+  },
+  "notes": [
+    "EffiRAG is excluded from baseline comparison because it is prior work by the same author.",
+    "Primary fair-comparison row is ACE-RAG-Compact common_qa + top3_chain_dedup.",
+    "Full-context common_qa remains the retrieval/evidence source for compact replay.",
+    "Native appendix row uses p8_r0_section_aware + r0_current + top8.",
+    "QMRAG-bundle is prompt ablation, not main fair-comparison result.",
+    "candidate_pool_size=60 is runtime ablation, not main default.",
+    "top3_chain_dedup is the compact setting to report against common-prompt baselines.",
+    "No dataset-specific settings are used in mainline configs."
+  ]
+}

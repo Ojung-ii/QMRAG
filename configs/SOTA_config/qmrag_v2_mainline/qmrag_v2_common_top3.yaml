@@ -1,0 +1,24 @@
+extends: qmrag_v2_common_full.yaml
+
+generation:
+  prompt_profile: common_qa
+  rendering_profile: structured_chain
+  token_counting:
+    enabled: true
+    tokenizer_model: auto
+    fallback_to_estimate: true
+
+sota_config:
+  role: paper_compact_common_top3_chain_dedup
+  prompt_experiment_type: compact_efficiency
+  context: compact_replay
+  top_bundles: 3
+  compaction_profile: top3_chain_dedup
+  context_token_budget: null
+  mainline_status: main_common_prompt_sota
+  notes:
+    - Paper-facing ACE-RAG-Compact common-prompt SOTA profile.
+    - Uses the same evidence_bundles as full common mainline; only rendered_context is compacted.
+    - Implement with replay_generation.py --compaction-profile top3_chain_dedup to avoid rerunning retrieval.
+    - Outperforms the best common-prompt baseline on all four n=1000 datasets with InputTok <= 800.
+    - This is the main controlled common-prompt row; method-specific/native prompts are appendix ablations.

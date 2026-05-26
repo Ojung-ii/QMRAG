@@ -4,8 +4,48 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 from .text import safe_truncate, sentence_split, token_count
 
 DEFAULT_PROMPT_PROFILE = "common_qa"
+DEFAULT_RENDERING_PROFILE = "structured_chain"
+RENDERING_PROFILES = (
+    "structured_chain",
+    "plain_evidence",
+    "chain_only_compact",
+    "multi_anchor_table",
+)
+
+COMPACTION_PROFILES = (
+    "none",
+    "chain_dedup",
+    "chain_dedup_budget",
+    "full_structured_budget",
+    "chain_skeleton",
+    "chain_plus1",
+    "sentence_cap",
+    "top3_chain_dedup",
+    "chain_dedup_no_sources",
+    "chain_dedup_plus1_no_sources",
+    "sentence_cap_no_sources",
+    "top3_chain_dedup_no_sources",
+    "chain_skeleton_no_sources",
+    "metadata_only_compact",
+    "chain_dedup_keep_sources",
+    "source_light_compact",
+    "chain_schema_k2",
+    "chain_schema_k3",
+    "chain_schema_k5",
+    "chain_schema_plus1_k2",
+    "chain_schema_plus1_k3",
+    "top3_schema_dedup",
+)
+
+ACE_RENDERER_VARIANTS = (
+    "r0_current",
+    "r1_clean_sentence",
+    "r2_title_paragraph",
+    "r3_chain_paragraph_hybrid",
+)
 
 PROMPT_TEMPLATES = {
+    # Main fair-comparison prompt. Do not change for QMRAG/baseline comparisons.
     "common_qa": """You are a QA assistant.
 Answer the question using only the provided Context.
 When possible, use a concise answer explicitly supported by the Context.
@@ -18,14 +58,13 @@ Question: {question}
 Context:
 {context}
 Answer:""",
+    # Existing QMRAG structured_chain native/ablation prompt. Kept for reproducibility.
     "qmrag_bundle_qa": """You are a QA assistant for evidence-bundle based retrieval.
 Answer the question using only the provided Context.
 
-The Context may contain multiple Evidence Bundles.
-Each bundle may describe an entity, a bridge entity, or a source sentence.
-Some questions require combining two bundles:
-- one bundle identifies the relevant entity;
-- another bundle states the property, date, location, author, occupation, or description of that entity.
+The Context may contain Evidence Chain, Multi-Anchor Evidence, and Supporting Evidence sections.
+For Evidence Chain, answer using the bridge/property sentence when it completes the question.
+For Multi-Anchor Evidence, compare the listed anchors using only the provided evidence.
 
 Use only information explicitly supported by the Context.
 Return only the final short answer span.
@@ -37,20 +76,1936 @@ Question: {question}
 Context:
 {context}
 Answer:""",
+    # Legacy ablation prompt; excluded from the new default runners.
+    "qmrag_bundle_light": """You are a QA assistant.
+Answer the question using only the provided Context.
+The Context may contain Evidence Chains and Multi-Anchor Evidence.
+For Evidence Chains, follow the Anchor → Bridge → answer evidence.
+For Multi-Anchor Evidence, compare only the listed anchors.
+Return only the final short answer.
+Do not output reasoning, explanations, citations, Markdown, or prefixes.
+For yes/no questions, output exactly yes or no in lowercase.
+If the answer cannot be found in the Context, output exactly: insufficient information
+
+Question: {question}
+Context:
+{context}
+Answer:""",
+    # Legacy ablation prompt; excluded from the new default runners.
+    "qmrag_bundle_tiny": """You are a QA assistant.
+Use only the Context.
+If an Evidence Chain is given, follow Anchor → Bridge → answer evidence.
+If Multi-Anchor Evidence is given, compare the listed anchors.
+Return only the final short answer.
+If unavailable, output exactly: insufficient information
+
+Question: {question}
+Context:
+{context}
+Answer:""",
+    "strict_short_qa": """---Role---
+
+You are an expert AI assistant specializing in answer extraction from a provided knowledge base.
+
+---Goal---
+
+Answer the user query using ONLY the provided Context.
+Return only the final short answer span.
+
+---Instructions---
+
+1. Grounding:
+  - Use only facts explicitly present in the Context.
+  - Do not use outside knowledge.
+  - If the answer cannot be found, output exactly: insufficient information
+
+2. Reasoning policy:
+  - Reason internally, but do not reveal chain-of-thought.
+  - Do not output intermediate analysis.
+
+3. Output format:
+  - Output exactly one line with only the final answer text.
+  - Do not output Markdown, bullets, headings, JSON, or code blocks.
+  - Do not output citations or a references section.
+  - Do not output prefixes such as "Answer:", "Final answer:", or "So the answer is:".
+  - For yes/no questions, output exactly `yes` or `no` in lowercase.
+
+4. Language:
+  - Use the same language as the user query unless the answer is a proper noun.
+
+Question: {question}
+Context:
+{context}
+Answer:""",
+    "qmrag_bundle_short_qa": """---Role---
+
+You are an expert QA assistant specializing in short answer extraction from evidence-chain context.
+
+---Goal---
+
+Answer the user query using ONLY the provided Context.
+Return only the final short answer span.
+
+---Instructions---
+
+1. Grounding:
+  - Use only facts explicitly present in the Context.
+  - Do not use outside knowledge.
+  - If the answer is not explicitly supported by the Context, output exactly: insufficient information
+
+2. Evidence-chain use:
+  - The Context may contain Evidence Chain, Multi-Anchor Evidence, and Supporting Evidence sections.
+  - For Evidence Chain, use the first sentence to connect the question anchor to the bridge entity.
+  - Then use the bridge/property sentence as the answer evidence when it satisfies the remaining question.
+  - For Multi-Anchor Evidence, compare only the listed anchors using the provided evidence.
+  - Use Supporting Evidence only when it confirms or completes the Evidence Chain.
+
+3. Reasoning policy:
+  - Reason internally, but do not reveal chain-of-thought.
+  - Do not output intermediate analysis.
+
+4. Output format:
+  - Output exactly one line with only the final answer text.
+  - Do not output Markdown, bullets, headings, JSON, or code blocks.
+  - Do not output citations or a references section.
+  - Do not output prefixes such as "Answer:", "Final answer:", or "So the answer is:".
+  - For yes/no questions, output exactly `yes` or `no` in lowercase.
+
+5. Language:
+  - Use the same language as the user query unless the answer is a proper noun.
+
+Question: {question}
+Context:
+{context}
+Answer:""",
+    "qmrag_compact_chain_qa": """You are a QA assistant for compact evidence-chain context.
+Answer the question using only the provided Context.
+
+Each Evidence Chain represents:
+Anchor evidence -> Bridge entity -> Answer evidence.
+
+Use a chain when:
+1. the first sentence links the question anchor to the bridge entity, and
+2. the next sentence gives the requested answer about that bridge entity.
+
+For Multi-Anchor Evidence, compare only the listed anchors.
+Use Support only when it confirms or completes the Evidence Chain.
+
+Do not use outside knowledge.
+Return only the final short answer.
+Do not output reasoning, explanations, citations, Markdown, or prefixes.
+For yes/no questions, output exactly yes or no in lowercase.
+If the answer is not explicitly supported by the Context, output exactly: insufficient information
+
+Question: {question}
+Context:
+{context}
+Answer:""",
+    "qmrag_compact_chain_light": """You are a QA assistant.
+Use only the Context.
+
+For an Evidence Chain, use the first sentence as the link from the question anchor to the bridge entity, and the next sentence as the answer evidence about that bridge entity.
+For Multi-Anchor Evidence, compare only the listed anchors.
+
+Return only the final short answer.
+If unsupported, output exactly: insufficient information
+
+Question: {question}
+Context:
+{context}
+Answer:""",
+    "qmrag_compact_chain_short_qa": """---Role---
+
+You are an expert QA assistant specializing in short answer extraction from compact evidence chains.
+
+---Goal---
+
+Answer the user query using ONLY the provided Context.
+Return only the final short answer span.
+
+---Instructions---
+
+1. Grounding:
+  - Use only facts explicitly present in the Context.
+  - Do not use outside knowledge.
+  - If the answer is not explicitly supported by the Context, output exactly: insufficient information
+
+2. Compact chain use:
+  - Each Evidence Chain represents: question anchor -> bridge entity -> answer evidence.
+  - Use the first sentence to link the question anchor to the bridge entity.
+  - Use the next sentence as the answer evidence about that bridge entity.
+  - For Multi-Anchor Evidence, compare only the listed anchors.
+
+3. Output format:
+  - Output exactly one line with only the final answer text.
+  - Do not output Markdown, bullets, headings, JSON, citations, references, or prefixes.
+  - For yes/no questions, output exactly `yes` or `no` in lowercase.
+
+Question: {question}
+Context:
+{context}
+Answer:""",
 }
 
-def build_context_text(bundles: Sequence[Mapping[str,Any]], max_chars: int=24000) -> str:
+PROMPT_TEMPLATES.update({
+    # ACE-RAG native prompt ablation variants. p0 is intentionally an exact
+    # alias of the current QMRAG/ACE-RAG short-style native prompt.
+    "acerag_native_p0_current": PROMPT_TEMPLATES["qmrag_bundle_short_qa"],
+    "acerag_native_p1_supporting_fallback": """---Role---
+
+You are an expert QA assistant specializing in short answer extraction from evidence-chain context.
+
+---Goal---
+
+Answer the user query using ONLY the provided Context.
+Return only the final short answer span.
+
+---Instructions---
+
+1. Grounding:
+  - Use only facts present in the Context.
+  - Do not use outside knowledge.
+  - If the Context does not contain enough evidence to determine the answer, output exactly: insufficient information
+
+2. Evidence use:
+  - The Context may contain Evidence Chain, Multi-Anchor Evidence, and Supporting Evidence sections.
+  - Use Supporting Evidence as direct answer evidence when it explicitly answers the question.
+  - Do not require an Evidence Chain if Supporting Evidence alone is sufficient.
+  - For Evidence Chain, use the first sentence to connect the question anchor to the bridge entity.
+  - Then use the bridge/property sentence as the answer evidence when it satisfies the remaining question.
+  - For Multi-Anchor Evidence, compare only the listed anchors using the provided evidence.
+  - Use Supporting Evidence also when it confirms or completes the Evidence Chain.
+  - Ignore empty sections, source lines, metadata, and unrelated anchors unless their evidence sentences help answer the question.
+
+3. Reasoning policy:
+  - Reason internally, but do not reveal chain-of-thought.
+  - Do not output intermediate analysis.
+
+4. Output format:
+  - Output exactly one line with only the final answer text.
+  - Do not output Markdown, bullets, headings, JSON, or code blocks.
+  - Do not output citations or a references section.
+  - Do not output prefixes such as "Answer:", "Final answer:", or "So the answer is:".
+  - For yes/no questions, output exactly `yes` or `no` in lowercase.
+
+5. Language:
+  - Use the same language as the user query unless the answer is a proper noun.
+
+Question: {question}
+Context:
+{context}
+Answer:""",
+    "acerag_native_p2_relaxed_chain": """---Role---
+
+You are an expert QA assistant specializing in short answer extraction from compact retrieved evidence.
+
+---Goal---
+
+Answer the user query using ONLY the provided Context.
+Return only the final short answer span.
+
+---Instructions---
+
+1. Grounding:
+  - Use only facts present in the Context.
+  - Do not use outside knowledge.
+  - If the Context does not contain enough evidence to determine the answer, output exactly: insufficient information
+
+2. Evidence use:
+  - First, look for evidence sentences that directly answer the question.
+  - Evidence Chain, Multi-Anchor Evidence, and Supporting Evidence are all valid evidence sources.
+  - Use Supporting Evidence as direct answer evidence when it answers the question.
+  - Do not require an Evidence Chain if Supporting Evidence alone is sufficient.
+  - If the answer requires a bridge entity, comparison, or multi-hop connection, use Evidence Chain or Multi-Anchor Evidence to connect the relevant facts.
+  - For Evidence Chain, use the chain to identify the question anchor, bridge entity, relation, and answer evidence.
+  - Do not assume the answer must appear in a fixed sentence position.
+  - For Multi-Anchor Evidence, compare or combine only the listed anchors using the provided evidence.
+  - Ignore empty sections, source lines, metadata, and unrelated anchors unless their evidence sentences help answer the question.
+
+3. Answer selection:
+  - Return the shortest answer span that correctly answers the question.
+  - Preserve conjunctions when multiple roles, entities, or attributes form the answer.
+
+4. Reasoning policy:
+  - Reason internally, but do not reveal chain-of-thought.
+  - Do not output intermediate analysis.
+
+5. Output format:
+  - Output exactly one line with only the final answer text.
+  - Do not output Markdown, bullets, headings, JSON, or code blocks.
+  - Do not output citations or a references section.
+  - Do not output prefixes such as "Answer:", "Final answer:", or "So the answer is:".
+  - For yes/no questions, output exactly `yes` or `no` in lowercase.
+
+6. Language:
+  - Use the same language as the user query unless the answer is a proper noun.
+
+Question: {question}
+Context:
+{context}
+Answer:""",
+    "acerag_native_p3_minimal_extraction": """---Role---
+
+You are an expert reading comprehension assistant.
+
+---Goal---
+
+Answer the question using only the provided Context.
+Return the shortest text span that answers the question.
+
+---Instructions---
+
+1. Use only the Context.
+2. Find the sentence or connected evidence that answers the question.
+3. If the question requires comparison or multi-hop reasoning, combine only the facts stated in the Context.
+4. Evidence Chain, Multi-Anchor Evidence, and Supporting Evidence are all valid evidence sources.
+5. Ignore metadata, source IDs, empty sections, and unrelated anchors.
+6. If the answer cannot be determined from the Context, output exactly: insufficient information
+7. Output exactly one line with only the final answer.
+8. Do not output reasoning, explanations, citations, Markdown, prefixes, or JSON.
+9. For yes/no questions, output exactly `yes` or `no` in lowercase.
+10. Use the same language as the user query unless the answer is a proper noun.
+
+Question: {question}
+Context:
+{context}
+Answer:""",
+    "acerag_native_p4_fewshot_extraction": """---Role---
+
+You are an expert reading comprehension assistant.
+
+---Goal---
+
+Answer the question using only the provided Context.
+Return the shortest text span that answers the question.
+
+---Instructions---
+
+1. Use only the Context.
+2. Find the sentence or connected evidence that answers the question.
+3. If the question requires comparison or multi-hop reasoning, combine only the facts stated in the Context.
+4. Evidence Chain, Multi-Anchor Evidence, and Supporting Evidence are all valid evidence sources.
+5. Ignore metadata, source IDs, empty sections, and unrelated anchors.
+6. If the answer cannot be determined from the Context, output exactly: insufficient information
+7. Output exactly one line with only the final answer.
+8. Do not output reasoning, explanations, citations, Markdown, prefixes, or JSON.
+9. For yes/no questions, output exactly `yes` or `no` in lowercase.
+10. Use the same language as the user query unless the answer is a proper noun.
+
+Example:
+Question: When was Neville A. Stanton's employer founded?
+Context:
+[Supporting Evidence | anchor=Neville A. Stanton]
+- Neville A. Stanton is a British Professor of Human Factors and Ergonomics at the University of Southampton.
+[Supporting Evidence | anchor=University of Southampton]
+- The University of Southampton was founded in 1862.
+Answer:
+1862
+
+Question: {question}
+Context:
+{context}
+Answer:""",
+    "acerag_native_p5_hippo_cot_style": """As an advanced reading comprehension assistant, your task is to answer the question using only the provided evidence context.
+
+You may reason internally. If you write reasoning, put the final concise answer after "Answer:".
+The final answer must be a short answer span.
+
+Example:
+Context:
+[Supporting Evidence 1 | anchor=Neville A. Stanton]
+- Neville A. Stanton: Neville A. Stanton is a British Professor of Human Factors and Ergonomics at the University of Southampton.
+[Supporting Evidence 2 | anchor=University of Southampton]
+- University of Southampton: The University of Southampton was founded in 1862.
+
+Question: When was Neville A. Stanton's employer founded?
+Thought: Neville A. Stanton's employer is the University of Southampton. The University of Southampton was founded in 1862.
+Answer: 1862
+
+Instruction:
+Use only the provided Context.
+Return the final short answer.
+If the answer cannot be determined from the Context, output exactly: insufficient information.
+For yes/no questions, output exactly yes or no in lowercase.
+
+Question: {question}
+Context:
+{context}
+Thought:""",
+    "acerag_native_p6_aggressive_span": """---Role---
+
+You are an expert short-answer extractor.
+
+---Goal---
+
+Answer the question using ONLY the provided Context.
+Return the shortest supported answer span.
+
+---Instructions---
+
+1. Search all Evidence Chain, Multi-Anchor Evidence, and Supporting Evidence sections.
+2. If any sentence directly or indirectly supports an answer, output the best supported short answer span.
+3. Do not output insufficient information merely because the evidence is compact or split across sections.
+4. Output insufficient information only if the Context contains no evidence sufficient to determine the answer.
+5. Prefer an answer span from the evidence sentence over a paraphrase.
+6. For questions asking occupation, role, nationality, location, date, number, person, organization, or title, output the specific phrase requested.
+7. For comparison questions, compare only the values explicitly given in the Context.
+8. Ignore source ids, relation_title fields, and metadata.
+9. Output exactly one line. No reasoning, citations, markdown, or prefixes.
+10. For yes/no questions, output exactly yes or no in lowercase.
+
+Question: {question}
+Context:
+{context}
+Answer:""",
+    "acerag_native_p7_anchor_priority": """---Role---
+
+You are an expert QA assistant for structured evidence contexts.
+
+---Goal---
+
+Answer the question using ONLY the provided Context.
+Return only the final short answer span.
+
+---Instructions---
+
+1. First identify the main entity or entities asked about in the Question.
+2. Prefer evidence sections whose anchor matches the question entity or a bridge entity connected from it.
+3. Do not answer from a similarly named but unrelated anchor unless the question explicitly asks about that anchor.
+4. Evidence Chain, Multi-Anchor Evidence, and Supporting Evidence are all valid evidence sources.
+5. Use Supporting Evidence directly if it answers the question.
+6. For bridge questions, use the source-side evidence to identify the bridge entity, then use the bridge-side evidence to extract the answer.
+7. For comparison questions, compare only the listed anchors and values in the Context.
+8. Ignore empty sections, source ids, relation_title fields, and metadata.
+9. If the Context does not contain enough evidence to determine the answer, output exactly: insufficient information.
+10. Output exactly one line with only the final answer. No reasoning, citations, markdown, or prefixes.
+11. For yes/no questions, output exactly yes or no in lowercase.
+
+Question: {question}
+Context:
+{context}
+Answer:""",
+    "acerag_native_p8_r0_section_aware": """---Role---
+
+You are an expert reading-comprehension assistant for ACE-RAG structured evidence.
+
+---Goal---
+
+Answer the question using ONLY the provided Context.
+Return only the final short answer span.
+
+---Instructions---
+
+1. The Context is organized into evidence sections.
+2. Section headers identify the evidence type and anchor entity.
+3. Earlier evidence sections are usually more relevant, but use later sections when they complete the answer.
+4. Use Evidence Chain sections to connect a question anchor to a bridge entity or answer entity.
+5. Use Multi-Anchor Evidence sections for comparison or questions involving multiple entities.
+6. Use Supporting Evidence sections as direct answer evidence when they answer the question.
+7. Ignore source ids, relation_title fields, and empty evidence sections.
+8. Do not use outside knowledge.
+9. If a supported answer span exists anywhere in the Context, output that answer span.
+10. Output insufficient information only when no evidence in the Context supports an answer.
+11. Output exactly one line with only the final answer.
+12. Do not output reasoning, explanations, citations, markdown, JSON, or prefixes.
+13. For yes/no questions, output exactly yes or no in lowercase.
+
+Question: {question}
+Context:
+{context}
+Answer:""",
+    "acerag_native_p9_hippo_style_answer_only": """---Role---
+
+You are an advanced reading comprehension assistant.
+
+---Goal---
+
+Answer the question using only the provided Context.
+Return only the final short answer.
+
+---Example---
+
+Context:
+[Supporting Evidence 1 | anchor=Neville A. Stanton]
+- Neville A. Stanton: Neville A. Stanton is a British Professor of Human Factors and Ergonomics at the University of Southampton.
+[Supporting Evidence 2 | anchor=University of Southampton]
+- University of Southampton: The University of Southampton was founded in 1862.
+Question: When was Neville A. Stanton's employer founded?
+Answer:
+1862
+
+---Instructions---
+
+1. Use only the Context.
+2. Identify the question entity, bridge entity, and answer evidence when needed.
+3. Use Supporting Evidence directly if it answers the question.
+4. For comparison questions, compare only facts stated in the Context.
+5. Ignore source ids, relation_title fields, and metadata.
+6. If the answer cannot be determined from the Context, output exactly: insufficient information.
+7. Output exactly one line with only the final answer.
+8. Do not output reasoning, explanations, citations, markdown, JSON, or prefixes.
+9. For yes/no questions, output exactly yes or no in lowercase.
+
+Question: {question}
+Context:
+{context}
+Answer:""",
+})
+
+ACE_NATIVE_PROMPT_VARIANT_TO_PROFILE = {
+    "p0_current": "acerag_native_p0_current",
+    "p1_supporting_fallback": "acerag_native_p1_supporting_fallback",
+    "p2_relaxed_chain": "acerag_native_p2_relaxed_chain",
+    "p3_minimal_extraction": "acerag_native_p3_minimal_extraction",
+    "p4_fewshot_extraction": "acerag_native_p4_fewshot_extraction",
+    "p5_hippo_cot_style": "acerag_native_p5_hippo_cot_style",
+    "p6_aggressive_span": "acerag_native_p6_aggressive_span",
+    "p7_anchor_priority": "acerag_native_p7_anchor_priority",
+    "p8_r0_section_aware": "acerag_native_p8_r0_section_aware",
+    "p9_hippo_style_answer_only": "acerag_native_p9_hippo_style_answer_only",
+}
+ACE_NATIVE_PROMPT_VARIANTS = tuple(ACE_NATIVE_PROMPT_VARIANT_TO_PROFILE)
+ACE_NATIVE_PROMPT_PROFILE_TO_VARIANT = {v: k for k, v in ACE_NATIVE_PROMPT_VARIANT_TO_PROFILE.items()}
+
+def resolve_ace_native_prompt_profile(variant: str | None) -> str:
+    key = str(variant or "p0_current")
+    if key not in ACE_NATIVE_PROMPT_VARIANT_TO_PROFILE:
+        raise ValueError(f"Unsupported ace_native_prompt_variant={key!r}; choices={list(ACE_NATIVE_PROMPT_VARIANTS)}")
+    return ACE_NATIVE_PROMPT_VARIANT_TO_PROFILE[key]
+
+def infer_ace_native_prompt_variant(prompt_profile: str | None) -> str | None:
+    return ACE_NATIVE_PROMPT_PROFILE_TO_VARIANT.get(str(prompt_profile or ""))
+
+INSUFFICIENT_PHRASES = (
+    "insufficient information",
+    "cannot be determined",
+    "not provided in the context",
+    "not found in the context",
+)
+
+IDK_PHRASES = (
+    "i don't know",
+    "i do not know",
+)
+
+_TOKENIZER_CACHE: dict[tuple[str, bool, bool], Any] = {}
+
+def count_tokens(text: str, tokenizer: Any = None) -> int:
+    if tokenizer is not None:
+        try:
+            return len(tokenizer.encode(str(text or ""), add_special_tokens=False))
+        except TypeError:
+            return len(tokenizer.encode(str(text or "")))
+        except Exception:
+            pass
+    return token_count(str(text or ""))
+
+def _token_counting_cfg(cfg: Mapping[str,Any] | None) -> Mapping[str,Any]:
+    tc=(cfg or {}).get("token_counting",{}) if cfg else {}
+    return tc if isinstance(tc,Mapping) else {}
+
+def _tokenizer_model_from_cfg(cfg: Mapping[str,Any] | None, model: Any = None) -> str | None:
+    tc=_token_counting_cfg(cfg)
+    requested=str(tc.get("tokenizer_model","auto") or "auto")
+    if requested.lower()!="auto":
+        return requested
+    for candidate in (model, (cfg or {}).get("model") if cfg else None):
+        value=str(candidate or "").strip()
+        if value and value.lower()!="auto":
+            return value
+    return None
+
+def _load_counting_tokenizer(cfg: Mapping[str,Any] | None, model: Any = None) -> tuple[Any | None, str]:
+    tc=_token_counting_cfg(cfg)
+    if tc and not bool(tc.get("enabled",True)):
+        return None,"approx"
+    tokenizer_model=_tokenizer_model_from_cfg(cfg,model)
+    if not tokenizer_model:
+        return None,"approx"
+    local_files_only=bool(tc.get("local_files_only",True))
+    trust_remote_code=bool(tc.get("trust_remote_code",True))
+    key=(tokenizer_model,local_files_only,trust_remote_code)
+    if key in _TOKENIZER_CACHE:
+        return _TOKENIZER_CACHE[key],"tokenizer"
+    try:
+        from transformers import AutoTokenizer
+        tokenizer=AutoTokenizer.from_pretrained(
+            tokenizer_model,
+            trust_remote_code=trust_remote_code,
+            local_files_only=local_files_only,
+        )
+        _TOKENIZER_CACHE[key]=tokenizer
+        return tokenizer,"tokenizer"
+    except Exception:
+        if tc and not bool(tc.get("fallback_to_estimate",True)):
+            raise
+        return None,"approx"
+
+def prompt_template_token_count(prompt_profile: str, tokenizer: Any = None) -> int:
+    profile=str(prompt_profile or DEFAULT_PROMPT_PROFILE)
+    if profile not in PROMPT_TEMPLATES:
+        profile=DEFAULT_PROMPT_PROFILE
+    return count_tokens(PROMPT_TEMPLATES[profile].format(question="", context=""), tokenizer)
+
+def extract_usage_token_counts(usage: Any) -> dict[str,int | None]:
+    if usage is None:
+        usage_dict={}
+    elif isinstance(usage,Mapping):
+        usage_dict=dict(usage)
+    elif hasattr(usage,"model_dump"):
+        usage_dict=usage.model_dump()
+    else:
+        usage_dict={k:getattr(usage,k) for k in ("prompt_tokens","completion_tokens","total_tokens") if hasattr(usage,k)}
+    def get_int(*keys: str) -> int | None:
+        for key in keys:
+            value=usage_dict.get(key)
+            if value is not None:
+                try:
+                    return int(value)
+                except Exception:
+                    return None
+        return None
+    return {
+        "prompt_tokens":get_int("prompt_tokens","input_tokens"),
+        "completion_tokens":get_int("completion_tokens","output_tokens"),
+        "total_tokens":get_int("total_tokens"),
+    }
+
+def llm_input_text(prompt: str, cfg: Mapping[str,Any] | None = None) -> str:
+    system_message=(cfg or {}).get("system_message") if cfg else None
+    if system_message is None and cfg:
+        system_message=cfg.get("system_prompt")
+    if system_message:
+        return f"{system_message}\n{prompt}"
+    return str(prompt or "")
+
+def add_token_accounting_fields(
+    row: Dict[str,Any],
+    prompt: str,
+    rendered_context: str,
+    raw_prediction: Any,
+    prompt_profile: str,
+    cfg: Mapping[str,Any] | None = None,
+    usage: Any = None,
+    model: Any = None,
+) -> Dict[str,Any]:
+    usage_counts=extract_usage_token_counts(usage)
+    tokenizer,counter_source=_load_counting_tokenizer(cfg,model)
+    usage_prompt=usage_counts.get("prompt_tokens")
+    usage_completion=usage_counts.get("completion_tokens")
+    usage_total=usage_counts.get("total_tokens")
+    input_prompt_tokens=usage_prompt if usage_prompt is not None else count_tokens(llm_input_text(prompt,cfg),tokenizer)
+    completion_tokens=usage_completion if usage_completion is not None else count_tokens(str(raw_prediction or ""),tokenizer)
+    total_llm_tokens=usage_total if usage_total is not None else int(input_prompt_tokens)+int(completion_tokens)
+    row.update({
+        "prompt_template_tokens":prompt_template_token_count(prompt_profile,tokenizer),
+        "rendered_context_tokens":count_tokens(rendered_context,tokenizer),
+        "input_prompt_tokens":int(input_prompt_tokens),
+        "completion_tokens":int(completion_tokens),
+        "total_llm_tokens":int(total_llm_tokens),
+        "token_count_source":"usage" if usage_prompt is not None or usage_completion is not None or usage_total is not None else counter_source,
+        "llm_usage_prompt_tokens":usage_prompt,
+        "llm_usage_completion_tokens":usage_completion,
+        "llm_usage_total_tokens":usage_total,
+    })
+    return row
+
+def _ordered_bundles(bundles: Sequence[Mapping[str,Any]]) -> list[Mapping[str,Any]]:
+    order_rank={"anchor_connected_chain_complete":0,"multi_anchor":1,"anchor":2,"chain_complete_v2":3,"bridge_connected":4,"same_title":5,"generic_relation":6,"fallback":7,"complete_bridge_chain":3,"exact_query_anchor":2,"bridge_candidate":4}
+    return [
+        item[1]
+        for item in sorted(
+        list(enumerate(bundles)),
+        key=lambda item:(
+            order_rank.get(str(item[1].get("ordering_group","same_title")),8),
+            not bool(item[1].get("chain_complete_v2",item[1].get("chain_complete"))),
+            not bool(item[1].get("anchor_connected")),
+            bool(item[1].get("is_generic_relation_title")),
+            not bool(item[1].get("exact_anchor_match")),
+            -float(item[1].get("residual_coverage_count",0.0) or 0.0),
+            -float(item[1].get("score",0.0) or 0.0),
+            item[0],
+        ),
+    )
+    ]
+
+def _bridge_paths(bundle: Mapping[str,Any]) -> list[Mapping[str,Any]]:
+    return [x for x in bundle.get("evidence_path",[]) or [] if isinstance(x,Mapping) and x.get("path_type")=="mention_bridge"]
+
+def _append_unique_sentence(lines: list[str], seen: set[str], title: str, text: Any, prefix: str="- ") -> None:
+    sentence=str(text or "").strip()
+    if not sentence:
+        return
+    key=" ".join(sentence.split())
+    if key in seen:
+        return
+    seen.add(key)
+    clean_title=str(title or "").strip()
+    if clean_title:
+        lines.append(f"{prefix}{clean_title}: {sentence}")
+    else:
+        lines.append(f"{prefix}{sentence}")
+
+def _sentence_norm(text: Any) -> str:
+    value=str(text or "").lower()
+    value=re.sub(r"[^a-z0-9]+"," ",value)
+    return " ".join(value.split())
+
+def _record(title: Any, text: Any, role: str, priority: int, source_id: Any = None) -> dict[str,Any] | None:
+    sentence=str(text or "").strip()
+    if not sentence:
+        return None
+    return {
+        "title":str(title or "").strip(),
+        "text":sentence,
+        "role":role,
+        "priority":int(priority),
+        "source_id":str(source_id or "").strip(),
+        "norm":_sentence_norm(sentence),
+    }
+
+def _chain_records(bundle: Mapping[str,Any]) -> list[dict[str,Any]]:
+    records=[]
+    for path in _bridge_paths(bundle):
+        seed=_record(path.get("source_title") or bundle.get("anchor_title"), path.get("seed_prop"), "chain_seed", 0, path.get("seed_prop_id"))
+        bridge=_record(path.get("bridge_title"), path.get("bridge_prop"), "chain_bridge", 1, path.get("bridge_prop_id"))
+        if seed: records.append(seed)
+        if bridge: records.append(bridge)
+    return records
+
+def _prop_records(bundle: Mapping[str,Any], chain_norms: set[str] | None = None) -> list[dict[str,Any]]:
+    chain_norms=chain_norms or set()
+    records=[]
+    for p in bundle.get("propositions",[]) or []:
+        rec=_record(p.get("title") or bundle.get("anchor_title"), p.get("text"), "support", 3, p.get("prop_id"))
+        if not rec or rec["norm"] in chain_norms:
+            continue
+        for score_key in ("residual_score","original_relevance_score","score","relevance_score"):
+            if p.get(score_key) is not None:
+                try:
+                    rec["score"]=float(p.get(score_key) or 0.0)
+                except Exception:
+                    rec["score"]=0.0
+                break
+        if bundle.get("answer_slot_aligned") or int(bundle.get("residual_coverage_count",0) or 0)>0:
+            rec["role"]="answer_slot_support"; rec["priority"]=2
+        elif bundle.get("anchor_connected"):
+            rec["role"]="anchor_support"; rec["priority"]=3
+        records.append(rec)
+    return records
+
+def _source_records(bundle: Mapping[str,Any], chain_norms: set[str] | None = None, limit_per_chunk: int = 2) -> list[dict[str,Any]]:
+    chain_norms=chain_norms or set()
+    records=[]
+    for c in bundle.get("source_chunks",[]) or []:
+        for sent in sentence_split(str(c.get("text","")))[:limit_per_chunk]:
+            rec=_record(c.get("title") or bundle.get("anchor_title"), sent, "source", 5, c.get("chunk_id"))
+            if rec and rec["norm"] not in chain_norms:
+                records.append(rec)
+    return records
+
+def _bundle_sentence_records(bundle: Mapping[str,Any], include_sources: bool = True) -> list[dict[str,Any]]:
+    chain=_chain_records(bundle)
+    chain_norms={r["norm"] for r in chain if r.get("norm")}
+    props=_prop_records(bundle, chain_norms)
+    records=chain+props
+    if include_sources:
+        records.extend(_source_records(bundle, {r["norm"] for r in records if r.get("norm")}))
+    return records
+
+def _append_record(lines: list[str], seen: set[str], rec: Mapping[str,Any], prefix: str = "- ") -> bool:
+    norm=str(rec.get("norm") or _sentence_norm(rec.get("text")))
+    if not norm or norm in seen:
+        return False
+    seen.add(norm)
+    title=str(rec.get("title") or "").strip()
+    text=str(rec.get("text") or "").strip()
+    if title:
+        lines.append(f"{prefix}{title}: {text}")
+    else:
+        lines.append(f"{prefix}{text}")
+    return True
+
+def _metadata_removed_count(bundles: Sequence[Mapping[str,Any]]) -> int:
+    count=0
+    bundle_keys=(
+        "score","ordering_group","anchor_connected","chain_complete","chain_complete_v2",
+        "anchor_connected_chain_complete","answer_slot_aligned","bridge_connected",
+        "is_relation_title_bundle","is_generic_relation_title","exact_anchor_match",
+        "residual_coverage_count","avg_residual_coverage_count",
+    )
+    for bundle in bundles or []:
+        count+=sum(1 for key in bundle_keys if bundle.get(key) not in (None,"",False,[],{}))
+        for path in bundle.get("evidence_path",[]) or []:
+            if not isinstance(path,Mapping):
+                continue
+            count+=sum(1 for key in ("seed_prop_id","bridge_prop_id","path_type","score","residual_coverage_count") if path.get(key) not in (None,"",False,[],{}))
+        for prop in bundle.get("propositions",[]) or []:
+            if not isinstance(prop,Mapping):
+                continue
+            count+=sum(1 for key in ("prop_id","score","rank","chunk_id","residual_score","original_relevance_score") if prop.get(key) not in (None,"",False,[],{}))
+        for chunk in bundle.get("source_chunks",[]) or []:
+            if not isinstance(chunk,Mapping):
+                continue
+            count+=sum(1 for key in ("chunk_id","score","rank") if chunk.get(key) not in (None,"",False,[],{}))
+    return count
+
+def rendered_sentence_count(text: Any) -> int:
+    count=0
+    for line in str(text or "").splitlines():
+        stripped=line.strip()
+        if not stripped or stripped.endswith(":"):
+            continue
+        if stripped.startswith("[") and stripped.endswith("]"):
+            continue
+        if stripped.startswith(("Anchor:","Bridge:","Sources:","Supporting Propositions:","Chain:","Title:","Evidence Chain:","Supporting Evidence:","Multi-Anchor Evidence:")):
+            continue
+        if stripped.startswith("- "):
+            count+=1
+        elif sentence_split(stripped):
+            count+=len(sentence_split(stripped))
+    return count
+
+def rendered_chain_count(text: Any) -> int:
+    return sum(1 for line in str(text or "").splitlines() if line.strip().startswith(("[Evidence Chain", "Evidence Chain")))
+
+def rendered_bundle_header_count(text: Any) -> int:
+    prefixes=("[Evidence Chain","[Supporting Evidence","[Multi-Anchor Evidence","Evidence Chain","Supporting Evidence","Multi-Anchor Evidence")
+    return sum(1 for line in str(text or "").splitlines() if line.strip().startswith(prefixes))
+
+def rendered_context_role_counts(text: Any) -> dict[str,int]:
+    section="other"
+    counts={"chain_sentence_count":0,"support_sentence_count":0,"source_sentence_count":0}
+    for line in str(text or "").splitlines():
+        stripped=line.strip()
+        if not stripped:
+            section="other"
+            continue
+        if stripped.startswith("[") and stripped.endswith("]"):
+            section="support"
+            continue
+        if stripped.startswith("Chain:"):
+            section="chain"
+            continue
+        if stripped.startswith(("Supporting Propositions:","Supporting Evidence:","Support:")):
+            section="support"
+            continue
+        if stripped.startswith("Sources:"):
+            section="source"
+            continue
+        if not stripped.startswith("- "):
+            continue
+        if section=="chain":
+            counts["chain_sentence_count"]+=1
+        elif section=="source":
+            counts["source_sentence_count"]+=1
+        else:
+            counts["support_sentence_count"]+=1
+    return counts
+
+def rendered_support_sentence_count(text: Any) -> int:
+    in_support=False
+    count=0
+    for line in str(text or "").splitlines():
+        stripped=line.strip()
+        if not stripped:
+            in_support=False
+            continue
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_support=False
+        if stripped in {"Support:","Supporting Evidence:","Supporting Propositions:"} or stripped.startswith("Supporting Evidence"):
+            in_support=True
+            continue
+        if in_support and stripped.startswith("- "):
+            count+=1
+    return count
+
+def rendered_fallback_used(text: Any) -> bool:
+    value=str(text or "")
+    return "[Supporting Evidence" in value and "[Evidence Chain" not in value and "[Multi-Anchor Evidence" not in value
+
+def bundle_sentence_statistics(evidence_bundles: Sequence[Mapping[str,Any]], rendered_context: Any = None) -> dict[str,Any]:
+    bundles=list(evidence_bundles or [])
+    per_bundle=[]
+    all_norms=[]
+    chain_count=0
+    support_count=0
+    source_count=0
+    multi_anchor_count=0
+    for bundle in bundles:
+        records=_bundle_sentence_records(bundle, include_sources=True)
+        per_bundle.append(len(records))
+        for rec in records:
+            norm=str(rec.get("norm") or "")
+            if norm:
+                all_norms.append(norm)
+            role=str(rec.get("role") or "")
+            if role.startswith("chain_"):
+                chain_count+=1
+            elif role=="source":
+                source_count+=1
+            else:
+                support_count+=1
+        if bundle.get("bundle_type")=="multi_anchor":
+            multi_anchor_count+=len([r for r in records if r.get("role")!="source"])
+    duplicate_count=max(0,len(all_norms)-len(set(all_norms)))
+    rendered_count=rendered_sentence_count(rendered_context) if rendered_context is not None else sum(per_bundle)
+    bundle_count=len(bundles)
+    top1=sum(per_bundle[:1])
+    top3=sum(per_bundle[:3])
+    return {
+        "bundle_count":bundle_count,
+        "rendered_sentence_count":rendered_count,
+        "avg_sentences_per_bundle":sum(per_bundle)/max(1,bundle_count),
+        "max_sentences_per_bundle":max(per_bundle or [0]),
+        "top1_bundle_sentence_count":top1,
+        "top3_bundle_sentence_count":top3,
+        "chain_sentence_count":chain_count,
+        "support_sentence_count":support_count,
+        "duplicate_sentence_count":duplicate_count,
+        "duplicate_sentence_rate":duplicate_count/max(1,len(all_norms)),
+        "source_sentence_count":source_count,
+        "multi_anchor_sentence_count":multi_anchor_count,
+    }
+
+def _source_title_for_bundle(bundle: Mapping[str,Any]) -> str:
+    return str(bundle.get("anchor_title") or bundle.get("title") or "").strip()
+
+def _render_structured_chain(bundles: Sequence[Mapping[str,Any]], max_chars: int) -> str:
     parts=[]
-    for b in bundles:
-        parts.append(f"[Bundle {b.get('bundle_id')} | anchor={b.get('anchor_title')} | score={b.get('score')}]")
+    ordered=_ordered_bundles(bundles)
+    for i,b in enumerate(ordered, start=1):
+        bridge=", ".join(str(x) for x in b.get("bridge_titles",[]) or [])
+        bundle_type=str(b.get("bundle_type") or "")
+        bridge_paths=_bridge_paths(b)
+        chain_texts=set()
+        if bundle_type=="multi_anchor":
+            anchors="; ".join(str(x) for x in b.get("anchor_titles",[]) or [])
+            parts.append(f"[Multi-Anchor Evidence {i} | anchors={anchors} | complete={bool(b.get('multi_anchor_complete'))}]")
+            seen=set()
+            for p in b.get("propositions",[]) or []:
+                title=str(p.get("title") or "")
+                text=str(p.get("text") or "")
+                key=(title,text)
+                if title and text and key not in seen:
+                    seen.add(key)
+                    parts.append(f"- {title}: {text}")
+            if not seen:
+                for c in b.get("source_chunks",[]) or []:
+                    title=str(c.get("title") or "")
+                    text=str(c.get("text") or "")
+                    if title and text:
+                        parts.append(f"- {title}: {text}")
+            parts.append("")
+            continue
+        if bridge_paths:
+            parts.append(f"[Evidence Chain {i} | anchor_connected={bool(b.get('anchor_connected'))} | chain_complete_v2={bool(b.get('chain_complete_v2',b.get('chain_complete')))} | score={b.get('score')}]")
+            parts.append(f"Anchor: {b.get('anchor_title')}")
+            if bridge:
+                parts.append(f"Bridge: {bridge}")
+            parts.append("Chain:")
+            for path in bridge_paths[:4]:
+                for title_key,text_key in (("source_title","seed_prop"),("bridge_title","bridge_prop")):
+                    text=str(path.get(text_key) or "")
+                    if text and not any(text==seen or text in seen for seen in chain_texts):
+                        chain_texts.add(text)
+                        parts.append(f"- {path.get(title_key)}: {text}")
+        else:
+            parts.append(f"[Supporting Evidence {i} | anchor={b.get('anchor_title')} | relation_title={bool(b.get('is_relation_title_bundle'))} | score={b.get('score')}]")
+            if b.get("anchor_title"):
+                parts.append(f"Anchor: {b.get('anchor_title')}")
         if b.get("propositions"):
-            parts.append("Propositions:")
-            for p in b.get("propositions",[]): parts.append(f"- ({p.get('prop_id')} | {p.get('title')}) {p.get('text')}")
+            prop_lines=[]
+            for p in b.get("propositions",[]):
+                text=str(p.get("text") or "")
+                if text and any(text==seen or text in seen for seen in chain_texts):
+                    continue
+                prop_lines.append(f"- ({p.get('prop_id')} | {p.get('title')}) {text}")
+            if prop_lines:
+                parts.append("Supporting Propositions:")
+                parts.extend(prop_lines)
         if b.get("source_chunks"):
             parts.append("Sources:")
             for c in b.get("source_chunks",[]): parts.append(f"- [{c.get('title')} | {c.get('chunk_id')}] {c.get('text')}")
         parts.append("")
     return safe_truncate("\n".join(parts).strip(), max_chars)
+
+def _fits_budget(parts: Sequence[str], additions: Sequence[str], max_chars: int, token_budget: int | None) -> bool:
+    candidate="\n".join(list(parts)+list(additions)).strip()
+    if len(candidate)>int(max_chars or 24000):
+        return False
+    if token_budget is not None and token_count(candidate)>int(token_budget):
+        return False
+    return True
+
+def _append_budget_block(parts: list[str], additions: Sequence[str], max_chars: int, token_budget: int | None) -> bool:
+    clean=[str(x) for x in additions if str(x).strip() or x==""]
+    if not clean:
+        return False
+    if not _fits_budget(parts,clean,max_chars,token_budget):
+        return False
+    parts.extend(clean)
+    return True
+
+def _append_budget_item_with_label(parts: list[str], label: str, item: str, label_present: bool, max_chars: int, token_budget: int | None) -> bool:
+    additions=[item] if label_present else [label,item]
+    if _append_budget_block(parts,additions,max_chars,token_budget):
+        return True
+    return False
+
+def _render_full_structured_budget(bundles: Sequence[Mapping[str,Any]], max_chars: int, token_budget: int | None) -> str:
+    parts: list[str]=[]
+    ordered=_ordered_bundles(bundles)
+    budget=int(token_budget) if token_budget is not None else None
+    for i,b in enumerate(ordered, start=1):
+        bridge=", ".join(str(x) for x in b.get("bridge_titles",[]) or [])
+        bundle_type=str(b.get("bundle_type") or "")
+        bridge_paths=_bridge_paths(b)
+        chain_texts:set[str]=set()
+        bundle_started=False
+        if bundle_type=="multi_anchor":
+            anchors="; ".join(str(x) for x in b.get("anchor_titles",[]) or [])
+            header=[f"[Multi-Anchor Evidence {i} | anchors={anchors} | complete={bool(b.get('multi_anchor_complete'))}]"]
+            if not _append_budget_block(parts,header,max_chars,budget):
+                continue
+            bundle_started=True
+            seen=set()
+            appended=False
+            for p in b.get("propositions",[]) or []:
+                title=str(p.get("title") or "")
+                text=str(p.get("text") or "")
+                key=(title,text)
+                if not title or not text or key in seen:
+                    continue
+                seen.add(key)
+                appended=_append_budget_block(parts,[f"- {title}: {text}"],max_chars,budget) or appended
+            if not appended:
+                for c in b.get("source_chunks",[]) or []:
+                    title=str(c.get("title") or "")
+                    text=str(c.get("text") or "")
+                    if title and text:
+                        _append_budget_block(parts,[f"- {title}: {text}"],max_chars,budget)
+            _append_budget_block(parts,[""],max_chars,budget)
+            continue
+        if bridge_paths:
+            header=[
+                f"[Evidence Chain {i} | anchor_connected={bool(b.get('anchor_connected'))} | chain_complete_v2={bool(b.get('chain_complete_v2',b.get('chain_complete')))} | score={b.get('score')}]",
+                f"Anchor: {b.get('anchor_title')}",
+            ]
+            if bridge:
+                header.append(f"Bridge: {bridge}")
+            header.append("Chain:")
+            if not _append_budget_block(parts,header,max_chars,budget):
+                continue
+            bundle_started=True
+            for path in bridge_paths[:4]:
+                for title_key,text_key in (("source_title","seed_prop"),("bridge_title","bridge_prop")):
+                    text=str(path.get(text_key) or "")
+                    if not text or any(text==seen or text in seen for seen in chain_texts):
+                        continue
+                    item=f"- {path.get(title_key)}: {text}"
+                    if _append_budget_block(parts,[item],max_chars,budget):
+                        chain_texts.add(text)
+        else:
+            header=[
+                f"[Supporting Evidence {i} | anchor={b.get('anchor_title')} | relation_title={bool(b.get('is_relation_title_bundle'))} | score={b.get('score')}]"
+            ]
+            if b.get("anchor_title"):
+                header.append(f"Anchor: {b.get('anchor_title')}")
+            if not _append_budget_block(parts,header,max_chars,budget):
+                continue
+            bundle_started=True
+        support_label=False
+        for p in b.get("propositions",[]) or []:
+            text=str(p.get("text") or "")
+            if not text or any(text==seen or text in seen for seen in chain_texts):
+                continue
+            item=f"- ({p.get('prop_id')} | {p.get('title')}) {text}"
+            if _append_budget_item_with_label(parts,"Supporting Propositions:",item,support_label,max_chars,budget):
+                support_label=True
+        source_label=False
+        for c in b.get("source_chunks",[]) or []:
+            text=str(c.get("text") or "")
+            if not text:
+                continue
+            item=f"- [{c.get('title')} | {c.get('chunk_id')}] {text}"
+            if _append_budget_item_with_label(parts,"Sources:",item,source_label,max_chars,budget):
+                source_label=True
+        if bundle_started:
+            _append_budget_block(parts,[""],max_chars,budget)
+    return "\n".join(parts).strip()
+
+def _render_plain_evidence(bundles: Sequence[Mapping[str,Any]], max_chars: int) -> str:
+    parts=[]
+    seen_global=set()
+    for b in _ordered_bundles(bundles):
+        title=_source_title_for_bundle(b)
+        lines=[]
+        seen=set()
+        for path in _bridge_paths(b):
+            _append_unique_sentence(lines, seen, str(path.get("source_title") or title), path.get("seed_prop"), prefix="")
+            _append_unique_sentence(lines, seen, str(path.get("bridge_title") or ""), path.get("bridge_prop"), prefix="")
+        for p in b.get("propositions",[]) or []:
+            _append_unique_sentence(lines, seen, str(p.get("title") or title), p.get("text"), prefix="")
+        if not lines:
+            for c in b.get("source_chunks",[]) or []:
+                for sent in sentence_split(str(c.get("text","")))[:2]:
+                    _append_unique_sentence(lines, seen, str(c.get("title") or title), sent, prefix="")
+        kept=[]
+        for line in lines:
+            key=" ".join(line.split())
+            if key and key not in seen_global:
+                seen_global.add(key); kept.append(line)
+        if not kept:
+            continue
+        if title:
+            parts.append(f"Title: {title}")
+        for line in kept:
+            if ": " in line:
+                maybe_title, sent=line.split(": ",1)
+                if maybe_title==title:
+                    parts.append(sent)
+                else:
+                    parts.append(f"{maybe_title}: {sent}")
+            else:
+                parts.append(line)
+        parts.append("")
+    return safe_truncate("\n".join(parts).strip(), max_chars)
+
+def _is_complete_chain_bundle(bundle: Mapping[str,Any]) -> bool:
+    return bool(bundle.get("anchor_connected_chain_complete") or bundle.get("chain_complete_v2") or bundle.get("chain_complete"))
+
+def _render_chain_only_compact(bundles: Sequence[Mapping[str,Any]], max_chars: int) -> str:
+    ordered=_ordered_bundles(bundles)
+    chain_bundles=[b for b in ordered if _bridge_paths(b) and _is_complete_chain_bundle(b)]
+    other_chain_bundles=[b for b in ordered if _bridge_paths(b) and b not in chain_bundles]
+    fallback=[b for b in ordered if not _bridge_paths(b)]
+    parts=[]
+    seen=set()
+    def append_bundle(bundle: Mapping[str,Any], label: str) -> None:
+        title=_source_title_for_bundle(bundle)
+        bridge=", ".join(str(x) for x in bundle.get("bridge_titles",[]) or [])
+        if label=="chain":
+            header=f"Evidence Chain: {title}"
+            if bridge:
+                header+=f" -> {bridge}"
+            parts.append(header)
+            for path in _bridge_paths(bundle):
+                _append_unique_sentence(parts, seen, str(path.get("source_title") or title), path.get("seed_prop"))
+                _append_unique_sentence(parts, seen, str(path.get("bridge_title") or ""), path.get("bridge_prop"))
+        else:
+            if title:
+                parts.append(f"Supporting Evidence: {title}")
+            for p in bundle.get("propositions",[]) or []:
+                _append_unique_sentence(parts, seen, str(p.get("title") or title), p.get("text"))
+        parts.append("")
+    for bundle in chain_bundles:
+        append_bundle(bundle,"chain")
+    for bundle in other_chain_bundles:
+        if len("\n".join(parts)) >= max_chars:
+            break
+        append_bundle(bundle,"chain")
+    for bundle in fallback:
+        if len("\n".join(parts)) >= max_chars:
+            break
+        append_bundle(bundle,"support")
+    return safe_truncate("\n".join(parts).strip(), max_chars)
+
+def _render_multi_anchor_table(bundles: Sequence[Mapping[str,Any]], max_chars: int) -> str:
+    ordered=_ordered_bundles(bundles)
+    parts=[]
+    seen=set()
+    for b in ordered:
+        if b.get("bundle_type")!="multi_anchor":
+            continue
+        parts.append("Multi-Anchor Evidence:")
+        for p in b.get("propositions",[]) or []:
+            _append_unique_sentence(parts, seen, str(p.get("title") or ""), p.get("text"))
+        if not b.get("propositions"):
+            for c in b.get("source_chunks",[]) or []:
+                for sent in sentence_split(str(c.get("text","")))[:2]:
+                    _append_unique_sentence(parts, seen, str(c.get("title") or ""), sent)
+        parts.append("")
+    for b in ordered:
+        if b.get("bundle_type")=="multi_anchor":
+            continue
+        if _bridge_paths(b):
+            title=_source_title_for_bundle(b)
+            bridge=", ".join(str(x) for x in b.get("bridge_titles",[]) or [])
+            parts.append(f"Evidence Chain: {title}" + (f" -> {bridge}" if bridge else ""))
+            for path in _bridge_paths(b):
+                _append_unique_sentence(parts, seen, str(path.get("source_title") or title), path.get("seed_prop"))
+                _append_unique_sentence(parts, seen, str(path.get("bridge_title") or ""), path.get("bridge_prop"))
+            parts.append("")
+        elif len("\n".join(parts)) < max_chars:
+            title=_source_title_for_bundle(b)
+            if title:
+                parts.append(f"Supporting Evidence: {title}")
+            for p in b.get("propositions",[]) or []:
+                _append_unique_sentence(parts, seen, str(p.get("title") or title), p.get("text"))
+            parts.append("")
+    return safe_truncate("\n".join(parts).strip(), max_chars)
+
+def _source_refs(bundle: Mapping[str,Any]) -> str:
+    refs=[]
+    for c in bundle.get("source_chunks",[]) or []:
+        title=str(c.get("title") or "").strip()
+        chunk_id=str(c.get("chunk_id") or "").strip()
+        if title or chunk_id:
+            refs.append(f"{title} | {chunk_id}".strip(" |"))
+    return "; ".join(dict.fromkeys(refs))
+
+def _append_source_chunks_no_metadata(
+    parts: list[str],
+    seen: set[str],
+    bundle: Mapping[str,Any],
+    sentence_limit_per_chunk: int | None = None,
+) -> int:
+    appended=0
+    for chunk in bundle.get("source_chunks",[]) or []:
+        title=str(chunk.get("title") or bundle.get("anchor_title") or "").strip()
+        text=str(chunk.get("text") or "").strip()
+        if not text:
+            continue
+        texts=[text]
+        if sentence_limit_per_chunk is not None:
+            texts=sentence_split(text)[:max(1,int(sentence_limit_per_chunk or 1))]
+        for sent in texts:
+            rec=_record(title,sent,"source",5,chunk.get("chunk_id"))
+            if rec and _append_record(parts,seen,rec):
+                appended+=1
+    return appended
+
+def _render_metadata_only_compact(bundles: Sequence[Mapping[str,Any]], max_chars: int) -> str:
+    parts=[]
+    for i,bundle in enumerate(_ordered_bundles(bundles), start=1):
+        seen:set[str]=set()
+        if bundle.get("bundle_type")=="multi_anchor":
+            anchors="; ".join(str(x) for x in bundle.get("anchor_titles",[]) or [])
+            parts.append(f"Multi-Anchor Evidence {i}: {anchors}" if anchors else f"Multi-Anchor Evidence {i}:")
+            for rec in _prop_records(bundle):
+                _append_record(parts,seen,rec)
+            if bundle.get("source_chunks"):
+                parts.append("Sources:")
+                _append_source_chunks_no_metadata(parts,seen,bundle,sentence_limit_per_chunk=None)
+            parts.append("")
+            continue
+        bridge=", ".join(str(x) for x in bundle.get("bridge_titles",[]) or [])
+        chain=_chain_records(bundle)
+        if chain:
+            anchor=str(bundle.get("anchor_title") or "").strip()
+            parts.append(f"Evidence Chain {i}: {anchor}" if anchor else f"Evidence Chain {i}:")
+            if bridge:
+                parts.append(f"Bridge: {bridge}")
+            parts.append("Chain:")
+            for rec in chain:
+                _append_record(parts,seen,rec)
+            support=_prop_records(bundle,{r.get("norm","") for r in chain})
+            if support:
+                parts.append("Supporting Evidence:")
+                for rec in support:
+                    _append_record(parts,seen,rec)
+        else:
+            anchor=str(bundle.get("anchor_title") or bundle.get("title") or "").strip()
+            parts.append(f"Supporting Evidence {i}: {anchor}" if anchor else f"Supporting Evidence {i}:")
+            for rec in _prop_records(bundle):
+                _append_record(parts,seen,rec)
+        if bundle.get("source_chunks"):
+            parts.append("Sources:")
+            _append_source_chunks_no_metadata(parts,seen,bundle,sentence_limit_per_chunk=None)
+        parts.append("")
+    return safe_truncate("\n".join(parts).strip(), max_chars)
+
+def _render_chain_dedup(bundles: Sequence[Mapping[str,Any]], max_chars: int) -> str:
+    parts=[]
+    seen:set[str]=set()
+    for i,bundle in enumerate(_ordered_bundles(bundles), start=1):
+        if bundle.get("bundle_type")=="multi_anchor":
+            anchors="; ".join(str(x) for x in bundle.get("anchor_titles",[]) or [])
+            parts.append(f"[Multi-Anchor Evidence {i} | anchors={anchors} | complete={bool(bundle.get('multi_anchor_complete'))}]")
+            appended=False
+            for rec in _prop_records(bundle):
+                appended=_append_record(parts,seen,rec) or appended
+            if not appended:
+                for rec in _source_records(bundle,limit_per_chunk=1):
+                    _append_record(parts,seen,rec)
+            parts.append("")
+            continue
+        bridge=", ".join(str(x) for x in bundle.get("bridge_titles",[]) or [])
+        if _bridge_paths(bundle):
+            parts.append(f"[Evidence Chain {i} | anchor_connected={bool(bundle.get('anchor_connected'))} | chain_complete_v2={bool(bundle.get('chain_complete_v2',bundle.get('chain_complete')))}]")
+            parts.append(f"Anchor: {bundle.get('anchor_title')}")
+            if bridge:
+                parts.append(f"Bridge: {bridge}")
+            parts.append("Chain:")
+            for rec in _chain_records(bundle):
+                _append_record(parts,seen,rec)
+            support_records=_prop_records(bundle,{r.get("norm","") for r in _chain_records(bundle)})
+            if support_records:
+                parts.append("Supporting Propositions:")
+                for rec in support_records:
+                    _append_record(parts,seen,rec)
+        else:
+            parts.append(f"[Supporting Evidence {i} | anchor={bundle.get('anchor_title')} | relation_title={bool(bundle.get('is_relation_title_bundle'))}]")
+            appended=False
+            for rec in _prop_records(bundle):
+                appended=_append_record(parts,seen,rec) or appended
+            if not appended:
+                for rec in _source_records(bundle,limit_per_chunk=1):
+                    _append_record(parts,seen,rec)
+        refs=_source_refs(bundle)
+        if refs:
+            parts.append(f"Sources: {refs}")
+        parts.append("")
+    return safe_truncate("\n".join(parts).strip(), max_chars)
+
+def _clean_records_for_bundle(bundle: Mapping[str,Any], include_source_fallback: bool = True) -> list[dict[str,Any]]:
+    chain=_chain_records(bundle)
+    chain_norms={r.get("norm","") for r in chain if r.get("norm")}
+    records=chain+_prop_records(bundle,chain_norms)
+    if include_source_fallback and not records:
+        records.extend(_source_records(bundle,chain_norms,limit_per_chunk=1))
+    return records
+
+def _append_plain_sentence(lines: list[str], seen: set[str], rec: Mapping[str,Any]) -> bool:
+    norm=str(rec.get("norm") or _sentence_norm(rec.get("text")))
+    text=str(rec.get("text") or "").strip()
+    if not norm or norm in seen or not text:
+        return False
+    seen.add(norm)
+    lines.append(text)
+    return True
+
+def _append_title_sentence(lines: list[str], seen: set[str], rec: Mapping[str,Any]) -> bool:
+    norm=str(rec.get("norm") or _sentence_norm(rec.get("text")))
+    title=str(rec.get("title") or "").strip()
+    text=str(rec.get("text") or "").strip()
+    if not norm or norm in seen or not text:
+        return False
+    seen.add(norm)
+    lines.append(f"{title}: {text}" if title else text)
+    return True
+
+def _render_clean_sentence(bundles: Sequence[Mapping[str,Any]], max_chars: int) -> str:
+    parts: list[str]=[]
+    seen:set[str]=set()
+    for bundle in bundles:
+        records=_clean_records_for_bundle(bundle)
+        if not records:
+            continue
+        anchors=bundle.get("anchor_titles") if bundle.get("bundle_type")=="multi_anchor" else None
+        anchor="; ".join(str(x) for x in anchors or [] if str(x).strip()) or str(bundle.get("anchor_title") or bundle.get("title") or "").strip()
+        block=[f"Title: {anchor}" if anchor else "Title:"]
+        before=len(seen)
+        for rec in records:
+            _append_title_sentence(block,seen,rec)
+        if len(seen)>before:
+            parts.extend(block); parts.append("")
+    return safe_truncate("\n".join(parts).strip(), max_chars)
+
+def _render_title_paragraph(bundles: Sequence[Mapping[str,Any]], max_chars: int) -> str:
+    grouped: dict[str,list[str]]={}
+    title_order: list[str]=[]
+    seen:set[str]=set()
+    for bundle in bundles:
+        records=_clean_records_for_bundle(bundle)
+        for rec in records:
+            norm=str(rec.get("norm") or _sentence_norm(rec.get("text")))
+            text=str(rec.get("text") or "").strip()
+            if not norm or norm in seen or not text:
+                continue
+            seen.add(norm)
+            title=str(rec.get("title") or bundle.get("anchor_title") or bundle.get("title") or "").strip()
+            if not title:
+                title="Evidence"
+            if title not in grouped:
+                grouped[title]=[]; title_order.append(title)
+            grouped[title].append(text)
+    parts: list[str]=[]
+    for title in title_order:
+        sentences=grouped.get(title,[])
+        if not sentences:
+            continue
+        parts.append(f"Wikipedia Title: {title}")
+        parts.append(" ".join(sentences))
+        parts.append("")
+    return safe_truncate("\n".join(parts).strip(), max_chars)
+
+def _render_multi_anchor_hybrid(parts: list[str], seen: set[str], bundle: Mapping[str,Any], idx: int) -> bool:
+    anchors=[str(x) for x in bundle.get("anchor_titles",[]) or [] if str(x).strip()]
+    if not anchors and bundle.get("anchor_title"):
+        anchors=[str(bundle.get("anchor_title"))]
+    records=_clean_records_for_bundle(bundle)
+    if not records:
+        return False
+    parts.append(f"Multi-Anchor Evidence {idx}")
+    if anchors:
+        parts.append("Anchors: "+"; ".join(anchors))
+    grouped: dict[str,list[Mapping[str,Any]]]={}
+    order: list[str]=[]
+    for rec in records:
+        title=str(rec.get("title") or "").strip() or (anchors[0] if anchors else "Evidence")
+        if title not in grouped:
+            grouped[title]=[]; order.append(title)
+        grouped[title].append(rec)
+    for title in order:
+        local_before=len(seen)
+        local: list[str]=[f"Anchor: {title}"]
+        for rec in grouped[title]:
+            _append_plain_sentence(local,seen,rec)
+        if len(seen)>local_before:
+            parts.extend(local)
+    parts.append("")
+    return True
+
+def _render_chain_paragraph_hybrid(bundles: Sequence[Mapping[str,Any]], max_chars: int) -> str:
+    parts: list[str]=[]
+    seen:set[str]=set()
+    idx=1
+    for bundle in bundles:
+        if bundle.get("bundle_type")=="multi_anchor":
+            if _render_multi_anchor_hybrid(parts,seen,bundle,idx):
+                idx+=1
+            continue
+        chain=_chain_records(bundle)
+        chain_norms={r.get("norm","") for r in chain if r.get("norm")}
+        support=_prop_records(bundle,chain_norms)
+        if chain:
+            before=len(seen)
+            block=[f"Evidence Chain {idx}"]
+            anchor=str(bundle.get("anchor_title") or "").strip()
+            bridge=", ".join(str(x) for x in bundle.get("bridge_titles",[]) or [] if str(x).strip())
+            if anchor:
+                block.append(f"Question anchor: {anchor}")
+            if bridge:
+                block.append(f"Bridge entity: {bridge}")
+            connection=[r for r in chain if str(r.get("role"))=="chain_seed"]
+            answer=[r for r in chain if str(r.get("role"))=="chain_bridge"]+support
+            if connection:
+                block.append("Connection evidence:")
+                for rec in connection:
+                    _append_plain_sentence(block,seen,rec)
+            if answer:
+                block.append("Answer evidence:")
+                for rec in answer:
+                    _append_plain_sentence(block,seen,rec)
+            if len(seen)>before:
+                parts.extend(block); parts.append(""); idx+=1
+            continue
+        records=support or _source_records(bundle,limit_per_chunk=1)
+        if not records:
+            continue
+        before=len(seen)
+        anchor=str(bundle.get("anchor_title") or bundle.get("title") or "").strip()
+        block=[f"Supporting Evidence {idx}"]
+        if anchor:
+            block.append(f"Anchor: {anchor}")
+        block.append("Evidence:")
+        for rec in records:
+            _append_plain_sentence(block,seen,rec)
+        if len(seen)>before:
+            parts.extend(block); parts.append(""); idx+=1
+    return safe_truncate("\n".join(parts).strip(), max_chars)
+
+def render_ace_renderer_context(
+    bundles: Sequence[Mapping[str,Any]],
+    renderer_variant: str = "r0_current",
+    max_chars: int = 24000,
+) -> str:
+    variant=str(renderer_variant or "r0_current")
+    if variant not in ACE_RENDERER_VARIANTS:
+        raise ValueError(f"Unsupported ace_renderer_variant={variant!r}; choices={list(ACE_RENDERER_VARIANTS)}")
+    if variant=="r1_clean_sentence":
+        return _render_clean_sentence(bundles,max_chars)
+    if variant=="r2_title_paragraph":
+        return _render_title_paragraph(bundles,max_chars)
+    if variant=="r3_chain_paragraph_hybrid":
+        return _render_chain_paragraph_hybrid(bundles,max_chars)
+    raise ValueError("r0_current must be handled by the existing renderer")
+
+def _render_chain_dedup_keep_sources(
+    bundles: Sequence[Mapping[str,Any]],
+    max_chars: int,
+    source_sentence_limit_per_chunk: int | None = None,
+) -> str:
+    parts=[]
+    seen:set[str]=set()
+    for i,bundle in enumerate(_ordered_bundles(bundles), start=1):
+        if bundle.get("bundle_type")=="multi_anchor":
+            _render_multi_anchor_no_sources(parts,seen,bundle,i,per_anchor_limit=None)
+        else:
+            bridge=", ".join(str(x) for x in bundle.get("bridge_titles",[]) or [])
+            chain=_chain_records(bundle)
+            if chain:
+                anchor=str(bundle.get("anchor_title") or "").strip()
+                parts.append(f"Evidence Chain {i}: {anchor}" if anchor else f"Evidence Chain {i}:")
+                if bridge:
+                    parts.append(f"Bridge: {bridge}")
+                parts.append("Chain:")
+                for rec in chain:
+                    _append_record(parts,seen,rec)
+                support=_support_records_for_compact(bundle,chain,limit=None)
+                if support:
+                    parts.append("Supporting Evidence:")
+                    for rec in support:
+                        _append_record(parts,seen,rec)
+            else:
+                support=_support_records_for_compact(bundle,[],limit=None)
+                if support:
+                    anchor=str(bundle.get("anchor_title") or bundle.get("title") or "").strip()
+                    parts.append(f"Supporting Evidence {i}: {anchor}" if anchor else f"Supporting Evidence {i}:")
+                    for rec in support:
+                        _append_record(parts,seen,rec)
+        if bundle.get("source_chunks"):
+            parts.append("Sources:")
+            _append_source_chunks_no_metadata(parts,seen,bundle,sentence_limit_per_chunk=source_sentence_limit_per_chunk)
+        parts.append("")
+    return safe_truncate("\n".join(parts).strip(), max_chars)
+
+def _support_records_for_compact(bundle: Mapping[str,Any], chain: Sequence[Mapping[str,Any]], limit: int | None = None) -> list[dict[str,Any]]:
+    chain_norms={str(r.get("norm") or "") for r in chain if r.get("norm")}
+    records=_prop_records(bundle,chain_norms)
+    records=sorted(records,key=lambda rec:(int(rec.get("priority",9)), -float(rec.get("score",0.0) or 0.0), len(str(rec.get("text","")))))
+    if limit is None:
+        return records
+    return records[:max(0,int(limit))]
+
+def _render_multi_anchor_no_sources(parts: list[str], seen: set[str], bundle: Mapping[str,Any], i: int, per_anchor_limit: int | None = None) -> None:
+    anchors=[str(x) for x in bundle.get("anchor_titles",[]) or []]
+    if anchors:
+        parts.append(f"Multi-Anchor Evidence {i}: " + "; ".join(anchors))
+    else:
+        parts.append(f"Multi-Anchor Evidence {i}:")
+    by_title: dict[str,list[dict[str,Any]]]={}
+    for rec in _prop_records(bundle):
+        by_title.setdefault(str(rec.get("title") or ""),[]).append(rec)
+    anchor_order=anchors or list(by_title.keys())
+    appended=False
+    for title in anchor_order:
+        candidates=sorted(by_title.get(title,[]),key=lambda rec:(int(rec.get("priority",9)), -float(rec.get("score",0.0) or 0.0), len(str(rec.get("text","")))))
+        if per_anchor_limit is not None:
+            candidates=candidates[:max(0,int(per_anchor_limit))]
+        for rec in candidates:
+            appended=_append_record(parts,seen,rec) or appended
+    if not appended:
+        for records in by_title.values():
+            for rec in records[:1]:
+                _append_record(parts,seen,rec)
+    parts.append("")
+
+def _render_chain_dedup_no_sources(
+    bundles: Sequence[Mapping[str,Any]],
+    max_chars: int,
+    support_limit: int | None = None,
+) -> str:
+    parts=[]
+    seen:set[str]=set()
+    for i,bundle in enumerate(_ordered_bundles(bundles), start=1):
+        if bundle.get("bundle_type")=="multi_anchor":
+            _render_multi_anchor_no_sources(parts,seen,bundle,i,per_anchor_limit=None if support_limit is None else 1)
+            continue
+        bridge=", ".join(str(x) for x in bundle.get("bridge_titles",[]) or [])
+        chain=_chain_records(bundle)
+        if chain:
+            anchor=str(bundle.get("anchor_title") or "").strip()
+            parts.append(f"Evidence Chain {i}: {anchor}" if anchor else f"Evidence Chain {i}:")
+            if bridge:
+                parts.append(f"Bridge: {bridge}")
+            parts.append("Chain:")
+            for rec in chain:
+                _append_record(parts,seen,rec)
+            support_records=_support_records_for_compact(bundle,chain,limit=support_limit)
+            if support_records:
+                parts.append("Supporting Evidence:")
+                for rec in support_records:
+                    _append_record(parts,seen,rec)
+        else:
+            support_records=_support_records_for_compact(bundle,[],limit=support_limit)
+            if not support_records:
+                continue
+            anchor=str(bundle.get("anchor_title") or bundle.get("title") or "").strip()
+            parts.append(f"Supporting Evidence {i}: {anchor}" if anchor else f"Supporting Evidence {i}:")
+            for rec in support_records:
+                _append_record(parts,seen,rec)
+        parts.append("")
+    return safe_truncate("\n".join(parts).strip(), max_chars)
+
+def _append_skeleton_bundle(parts: list[str], seen: set[str], bundle: Mapping[str,Any], include_plus_one: bool = False) -> None:
+    if bundle.get("bundle_type")=="multi_anchor":
+        parts.append("[Multi-Anchor Evidence]")
+        by_title: dict[str,dict[str,Any]]={}
+        for rec in _prop_records(bundle):
+            by_title.setdefault(str(rec.get("title") or ""), rec)
+        if not by_title:
+            for rec in _source_records(bundle,limit_per_chunk=1):
+                by_title.setdefault(str(rec.get("title") or ""), rec)
+        for rec in by_title.values():
+            _append_record(parts,seen,rec)
+        parts.append("")
+        return
+    chain=_chain_records(bundle)
+    if chain:
+        bridge=", ".join(str(x) for x in bundle.get("bridge_titles",[]) or [])
+        header=f"Evidence Chain: {bundle.get('anchor_title')}"
+        if bridge:
+            header+=f" -> {bridge}"
+        parts.append(header)
+        seed_added=False
+        bridge_added=False
+        for rec in chain:
+            role=str(rec.get("role") or "")
+            if role=="chain_seed" and not seed_added:
+                seed_added=_append_record(parts,seen,rec)
+            elif role=="chain_bridge" and not bridge_added:
+                bridge_added=_append_record(parts,seen,rec)
+            if seed_added and bridge_added:
+                break
+        if include_plus_one:
+            support=sorted(_prop_records(bundle,{r.get("norm","") for r in chain}), key=lambda r:(int(r.get("priority",9)), len(str(r.get("text","")))))
+            for rec in support:
+                if _append_record(parts,seen,rec):
+                    break
+        parts.append("")
+
+def _render_chain_skeleton(bundles: Sequence[Mapping[str,Any]], max_chars: int, include_plus_one: bool = False) -> str:
+    parts=[]
+    seen:set[str]=set()
+    for bundle in _ordered_bundles(bundles):
+        if _bridge_paths(bundle) or bundle.get("bundle_type")=="multi_anchor":
+            _append_skeleton_bundle(parts,seen,bundle,include_plus_one=include_plus_one)
+    return safe_truncate("\n".join(parts).strip(), max_chars)
+
+def _render_chain_skeleton_no_sources(bundles: Sequence[Mapping[str,Any]], max_chars: int) -> str:
+    parts=[]
+    seen:set[str]=set()
+    for bundle in _ordered_bundles(bundles):
+        if bundle.get("bundle_type")=="multi_anchor":
+            _render_multi_anchor_no_sources(parts,seen,bundle,len(parts)+1,per_anchor_limit=1)
+            continue
+        chain=_chain_records(bundle)
+        if not chain:
+            continue
+        bridge=", ".join(str(x) for x in bundle.get("bridge_titles",[]) or [])
+        anchor=str(bundle.get("anchor_title") or "").strip()
+        parts.append(f"Evidence Chain: {anchor}" if anchor else "Evidence Chain:")
+        if bridge:
+            parts.append(f"Bridge: {bridge}")
+        seed_added=False
+        bridge_added=False
+        for rec in chain:
+            role=str(rec.get("role") or "")
+            if role=="chain_seed" and not seed_added:
+                seed_added=_append_record(parts,seen,rec)
+            elif role=="chain_bridge" and not bridge_added:
+                bridge_added=_append_record(parts,seen,rec)
+            if seed_added and bridge_added:
+                break
+        parts.append("")
+    return safe_truncate("\n".join(parts).strip(), max_chars)
+
+def _render_sentence_cap(bundles: Sequence[Mapping[str,Any]], max_chars: int, max_sentences_per_bundle: int = 3) -> str:
+    parts=[]
+    seen:set[str]=set()
+    cap=max(1,int(max_sentences_per_bundle or 3))
+    for i,bundle in enumerate(_ordered_bundles(bundles), start=1):
+        bridge=", ".join(str(x) for x in bundle.get("bridge_titles",[]) or [])
+        if bundle.get("bundle_type")=="multi_anchor":
+            anchors="; ".join(str(x) for x in bundle.get("anchor_titles",[]) or [])
+            parts.append(f"[Multi-Anchor Evidence {i} | anchors={anchors}]")
+        elif _bridge_paths(bundle):
+            parts.append(f"[Evidence Chain {i} | anchor_connected={bool(bundle.get('anchor_connected'))} | chain_complete_v2={bool(bundle.get('chain_complete_v2',bundle.get('chain_complete')))}]")
+            parts.append(f"Anchor: {bundle.get('anchor_title')}")
+            if bridge:
+                parts.append(f"Bridge: {bridge}")
+        else:
+            parts.append(f"[Supporting Evidence {i} | anchor={bundle.get('anchor_title')}]")
+        records=_bundle_sentence_records(bundle,include_sources=True)
+        records=sorted(records,key=lambda rec:(int(rec.get("priority",9)), 0 if rec.get("role")!="source" else 1))
+        kept=0
+        for rec in records:
+            if _append_record(parts,seen,rec):
+                kept+=1
+            if kept>=cap:
+                break
+        parts.append("")
+    return safe_truncate("\n".join(parts).strip(), max_chars)
+
+def _render_sentence_cap_no_sources(bundles: Sequence[Mapping[str,Any]], max_chars: int, max_sentences_per_bundle: int = 3) -> str:
+    parts=[]
+    seen:set[str]=set()
+    cap=max(1,int(max_sentences_per_bundle or 3))
+    for i,bundle in enumerate(_ordered_bundles(bundles), start=1):
+        records=_bundle_sentence_records(bundle,include_sources=False)
+        records=sorted(records,key=lambda rec:(int(rec.get("priority",9)), -float(rec.get("score",0.0) or 0.0), len(str(rec.get("text","")))))
+        if not records:
+            continue
+        bridge=", ".join(str(x) for x in bundle.get("bridge_titles",[]) or [])
+        if bundle.get("bundle_type")=="multi_anchor":
+            anchors="; ".join(str(x) for x in bundle.get("anchor_titles",[]) or [])
+            parts.append(f"Multi-Anchor Evidence {i}: {anchors}" if anchors else f"Multi-Anchor Evidence {i}:")
+        elif _bridge_paths(bundle):
+            anchor=str(bundle.get("anchor_title") or "").strip()
+            parts.append(f"Evidence Chain {i}: {anchor}" if anchor else f"Evidence Chain {i}:")
+            if bridge:
+                parts.append(f"Bridge: {bridge}")
+        else:
+            anchor=str(bundle.get("anchor_title") or bundle.get("title") or "").strip()
+            parts.append(f"Supporting Evidence {i}: {anchor}" if anchor else f"Supporting Evidence {i}:")
+        kept=0
+        for rec in records:
+            if _append_record(parts,seen,rec):
+                kept+=1
+            if kept>=cap:
+                break
+        parts.append("")
+    return safe_truncate("\n".join(parts).strip(), max_chars)
+
+def _chain_schema_profile_args(profile: str) -> tuple[int | None, bool, bool]:
+    if profile=="chain_schema_k2":
+        return 2, False, False
+    if profile=="chain_schema_k3":
+        return 3, False, False
+    if profile=="chain_schema_k5":
+        return 5, False, False
+    if profile=="chain_schema_plus1_k2":
+        return 2, True, False
+    if profile=="chain_schema_plus1_k3":
+        return 3, True, False
+    if profile=="top3_schema_dedup":
+        return 3, True, True
+    raise ValueError(profile)
+
+def _first_by_role(records: Sequence[Mapping[str,Any]], role: str) -> Mapping[str,Any] | None:
+    for rec in records:
+        if str(rec.get("role") or "") == role:
+            return rec
+    return None
+
+def _append_schema_record(parts: list[str], seen: set[str], rec: Mapping[str,Any] | None) -> bool:
+    if not rec:
+        return False
+    return _append_record(parts, seen, rec)
+
+def _append_chain_schema_bundle(
+    parts: list[str],
+    seen: set[str],
+    bundle: Mapping[str,Any],
+    idx: int,
+    include_plus_one: bool,
+) -> bool:
+    chain=_chain_records(bundle)
+    if not chain:
+        return False
+    anchor=str(bundle.get("anchor_title") or "").strip()
+    bridge_titles=[str(x).strip() for x in bundle.get("bridge_titles",[]) or [] if str(x).strip()]
+    bridge=", ".join(bridge_titles)
+    parts.append(f"[Evidence Chain {idx}]")
+    if anchor:
+        parts.append(f"Anchor: {anchor}")
+    if bridge:
+        parts.append(f"Bridge: {bridge}")
+    seed=_first_by_role(chain,"chain_seed")
+    bridge_rec=_first_by_role(chain,"chain_bridge")
+    _append_schema_record(parts,seen,seed)
+    _append_schema_record(parts,seen,bridge_rec)
+    if include_plus_one:
+        support=_support_records_for_compact(bundle,chain,limit=1)
+        if support:
+            parts.append("Support:")
+            _append_schema_record(parts,seen,support[0])
+    parts.append("")
+    return True
+
+def _append_multi_anchor_schema_bundle(parts: list[str], seen: set[str], bundle: Mapping[str,Any], idx: int) -> bool:
+    anchors=[str(x).strip() for x in bundle.get("anchor_titles",[]) or [] if str(x).strip()]
+    parts.append(f"[Multi-Anchor Evidence {idx}]")
+    if anchors:
+        parts.append("Anchors: " + "; ".join(anchors))
+    before=len(parts)
+    by_title: dict[str,list[dict[str,Any]]]={}
+    for rec in _prop_records(bundle):
+        by_title.setdefault(str(rec.get("title") or ""),[]).append(rec)
+    for title in anchors or list(by_title):
+        candidates=sorted(by_title.get(title,[]),key=lambda rec:(int(rec.get("priority",9)), -float(rec.get("score",0.0) or 0.0), len(str(rec.get("text","")))))
+        if candidates:
+            _append_schema_record(parts,seen,candidates[0])
+    if len(parts)==before:
+        for rec in _source_records(bundle,limit_per_chunk=1):
+            if _append_schema_record(parts,seen,rec):
+                break
+    parts.append("")
+    return len(parts)>before+1
+
+def _append_supporting_schema_fallback(parts: list[str], seen: set[str], bundle: Mapping[str,Any], idx: int) -> bool:
+    support=_support_records_for_compact(bundle,[],limit=1)
+    if not support:
+        source=_source_records(bundle,limit_per_chunk=1)
+        support=source[:1]
+    if not support:
+        return False
+    anchor=str(bundle.get("anchor_title") or bundle.get("title") or "").strip()
+    parts.append(f"[Supporting Evidence {idx}]")
+    if anchor:
+        parts.append(f"Anchor: {anchor}")
+    appended=_append_schema_record(parts,seen,support[0])
+    parts.append("")
+    return appended
+
+def _render_chain_schema(
+    bundles: Sequence[Mapping[str,Any]],
+    max_chars: int,
+    k: int | None,
+    include_plus_one: bool,
+) -> str:
+    ordered=_ordered_bundles(bundles)
+    parts: list[str]=[]
+    seen: set[str]=set()
+    rendered=0
+    idx=1
+    for bundle in ordered:
+        if k is not None and rendered>=int(k):
+            break
+        appended=False
+        if _bridge_paths(bundle):
+            appended=_append_chain_schema_bundle(parts,seen,bundle,idx,include_plus_one=include_plus_one)
+        elif bundle.get("bundle_type")=="multi_anchor":
+            appended=_append_multi_anchor_schema_bundle(parts,seen,bundle,idx)
+        if appended:
+            rendered+=1
+            idx+=1
+    if rendered==0:
+        for bundle in ordered[:1]:
+            if _append_supporting_schema_fallback(parts,seen,bundle,idx):
+                break
+    return safe_truncate("\n".join(parts).strip(), max_chars)
+
+def _render_compacted_context(
+    bundles: Sequence[Mapping[str,Any]],
+    max_chars: int,
+    compaction_profile: str,
+    max_sentences_per_bundle: int = 3,
+    token_budget: int | None = None,
+) -> str:
+    profile=str(compaction_profile or "none")
+    if profile=="full_structured_budget":
+        return _render_full_structured_budget(bundles,max_chars,token_budget)
+    if profile=="metadata_only_compact":
+        return _render_metadata_only_compact(bundles,max_chars)
+    if profile=="chain_dedup":
+        return _render_chain_dedup(bundles,max_chars)
+    if profile=="chain_dedup_budget":
+        return _render_chain_dedup(bundles,max_chars)
+    if profile=="chain_dedup_no_sources":
+        return _render_chain_dedup_no_sources(bundles,max_chars,support_limit=None)
+    if profile=="chain_dedup_keep_sources":
+        return _render_chain_dedup_keep_sources(bundles,max_chars,source_sentence_limit_per_chunk=None)
+    if profile=="source_light_compact":
+        return _render_chain_dedup_keep_sources(bundles,max_chars,source_sentence_limit_per_chunk=1)
+    if profile=="chain_skeleton":
+        return _render_chain_skeleton(bundles,max_chars,include_plus_one=False)
+    if profile=="chain_skeleton_no_sources":
+        return _render_chain_skeleton_no_sources(bundles,max_chars)
+    if profile=="chain_plus1":
+        return _render_chain_skeleton(bundles,max_chars,include_plus_one=True)
+    if profile=="chain_dedup_plus1_no_sources":
+        return _render_chain_dedup_no_sources(bundles,max_chars,support_limit=1)
+    if profile=="sentence_cap":
+        return _render_sentence_cap(bundles,max_chars,max_sentences_per_bundle=max_sentences_per_bundle)
+    if profile=="sentence_cap_no_sources":
+        return _render_sentence_cap_no_sources(bundles,max_chars,max_sentences_per_bundle=max_sentences_per_bundle)
+    if profile=="top3_chain_dedup":
+        return _render_chain_dedup(_ordered_bundles(bundles)[:3],max_chars)
+    if profile=="top3_chain_dedup_no_sources":
+        return _render_chain_dedup_no_sources(_ordered_bundles(bundles)[:3],max_chars,support_limit=None)
+    if profile in {"chain_schema_k2","chain_schema_k3","chain_schema_k5","chain_schema_plus1_k2","chain_schema_plus1_k3","top3_schema_dedup"}:
+        k, include_plus_one, _dedup = _chain_schema_profile_args(profile)
+        return _render_chain_schema(bundles,max_chars,k=k,include_plus_one=include_plus_one)
+    raise ValueError(f"Unsupported compaction_profile={profile!r}; choices={list(COMPACTION_PROFILES)}")
+
+def render_context(
+    evidence_bundles: Sequence[Mapping[str,Any]],
+    rendering_profile: str = DEFAULT_RENDERING_PROFILE,
+    max_chars: int = 24000,
+    token_budget: int | None = None,
+    compaction_profile: str = "none",
+    max_sentences_per_bundle: int = 3,
+    ace_renderer_variant: str = "r0_current",
+    **_: Any,
+) -> str:
+    profile=str(rendering_profile or DEFAULT_RENDERING_PROFILE)
+    if profile not in RENDERING_PROFILES:
+        raise ValueError(f"Unsupported rendering_profile={profile!r}; choices={list(RENDERING_PROFILES)}")
+    compact=str(compaction_profile or "none")
+    if compact not in COMPACTION_PROFILES:
+        raise ValueError(f"Unsupported compaction_profile={compact!r}; choices={list(COMPACTION_PROFILES)}")
+    renderer=str(ace_renderer_variant or "r0_current")
+    if renderer not in ACE_RENDERER_VARIANTS:
+        raise ValueError(f"Unsupported ace_renderer_variant={renderer!r}; choices={list(ACE_RENDERER_VARIANTS)}")
+    char_budget=int(max_chars or 24000)
+    if token_budget:
+        char_budget=min(char_budget, int(token_budget)*6)
+    if renderer!="r0_current":
+        return render_ace_renderer_context(evidence_bundles,renderer,char_budget)
+    if compact!="none":
+        return _render_compacted_context(evidence_bundles,char_budget,compact,max_sentences_per_bundle=max_sentences_per_bundle,token_budget=token_budget)
+    if profile=="structured_chain":
+        return _render_structured_chain(evidence_bundles,char_budget)
+    if profile=="plain_evidence":
+        return _render_plain_evidence(evidence_bundles,char_budget)
+    if profile=="chain_only_compact":
+        return _render_chain_only_compact(evidence_bundles,char_budget)
+    if profile=="multi_anchor_table":
+        return _render_multi_anchor_table(evidence_bundles,char_budget)
+    raise AssertionError(profile)
+
+def render_context_with_metadata(
+    evidence_bundles: Sequence[Mapping[str,Any]],
+    rendering_profile: str = DEFAULT_RENDERING_PROFILE,
+    max_chars: int = 24000,
+    token_budget: int | None = None,
+    compaction_profile: str = "none",
+    max_sentences_per_bundle: int = 3,
+    ace_renderer_variant: str = "r0_current",
+) -> tuple[str,dict[str,Any]]:
+    original_stats=bundle_sentence_statistics(evidence_bundles)
+    context=render_context(
+        evidence_bundles,
+        rendering_profile=rendering_profile,
+        max_chars=max_chars,
+        token_budget=token_budget,
+        compaction_profile=compaction_profile,
+        max_sentences_per_bundle=max_sentences_per_bundle,
+        ace_renderer_variant=ace_renderer_variant,
+    )
+    rendered_stats=bundle_sentence_statistics(evidence_bundles,context)
+    role_counts=rendered_context_role_counts(context)
+    stats=dict(rendered_stats)
+    compact=str(compaction_profile or "none")
+    no_sources="no_sources" in compact or "schema" in compact
+    stats.update({
+        "original_sentence_count":original_stats.get("rendered_sentence_count",0),
+        "dropped_sentence_count":max(0,int(original_stats.get("rendered_sentence_count",0) or 0)-int(rendered_stats.get("rendered_sentence_count",0) or 0)),
+        "rendered_bundle_count":rendered_bundle_header_count(context),
+        "rendered_chain_sentence_count":role_counts.get("chain_sentence_count",0),
+        "rendered_support_count":role_counts.get("support_sentence_count",0),
+        "rendered_source_count":role_counts.get("source_sentence_count",0),
+        "dropped_chain_sentence_count":max(0,int(original_stats.get("chain_sentence_count",0) or 0)-int(role_counts.get("chain_sentence_count",0) or 0)),
+        "dropped_support_count":max(0,int(original_stats.get("support_sentence_count",0) or 0)-int(role_counts.get("support_sentence_count",0) or 0)),
+        "dropped_source_count":max(0,int(original_stats.get("source_sentence_count",0) or 0)-int(role_counts.get("source_sentence_count",0) or 0)),
+        "duplicate_removed_count":max(0,int(original_stats.get("duplicate_sentence_count",0) or 0)-int(rendered_stats.get("duplicate_sentence_count",0) or 0)),
+        "source_removed_count":int(original_stats.get("source_sentence_count",0) or 0) if no_sources else 0,
+        "metadata_removed_count":_metadata_removed_count(evidence_bundles) if compact!="none" else 0,
+        "rendered_chain_count":rendered_chain_count(context),
+        "support_sentence_count":rendered_support_sentence_count(context),
+        "fallback_used":rendered_fallback_used(context),
+        "compaction_profile":compact,
+        "ace_renderer_variant":str(ace_renderer_variant or "r0_current"),
+        "max_sentences_per_bundle":int(max_sentences_per_bundle or 3),
+    })
+    return context,stats
+
+def build_context_text(bundles: Sequence[Mapping[str,Any]], max_chars: int=24000, rendering_profile: str=DEFAULT_RENDERING_PROFILE) -> str:
+    return render_context(bundles, rendering_profile=rendering_profile, max_chars=max_chars)
 
 def build_prompt(question: str, context: str, prompt_profile: str = DEFAULT_PROMPT_PROFILE) -> str:
     profile = str(prompt_profile or DEFAULT_PROMPT_PROFILE)
@@ -58,11 +2013,33 @@ def build_prompt(question: str, context: str, prompt_profile: str = DEFAULT_PROM
         raise ValueError(f"Unsupported prompt_profile={profile!r}; choices={sorted(PROMPT_TEMPLATES)}")
     return PROMPT_TEMPLATES[profile].format(question=question, context=context)
 
-def build_generation_prompt(question: str, bundles: Sequence[Mapping[str,Any]], cfg: Optional[Mapping[str,Any]]=None) -> tuple[str, str]:
+def is_insufficient_prediction(prediction: Any) -> bool:
+    text=str(prediction or "").lower()
+    return any(phrase in text for phrase in INSUFFICIENT_PHRASES)
+
+def has_idk_phrase(prediction: Any) -> bool:
+    text=str(prediction or "").lower()
+    return any(phrase in text for phrase in IDK_PHRASES)
+
+def normalize_prediction_for_eval(prediction: Any) -> str:
+    if prediction is None:
+        return ""
+    return str(prediction).strip()
+
+def build_generation_prompt(question: str, bundles: Sequence[Mapping[str,Any]], cfg: Optional[Mapping[str,Any]]=None) -> tuple[str, str, str, dict[str,Any]]:
     cfg=cfg or {}
     prompt_profile=str(cfg.get("prompt_profile") or DEFAULT_PROMPT_PROFILE)
-    context=build_context_text(bundles, int(cfg.get("max_context_chars",24000)))
-    return build_prompt(question, context, prompt_profile), prompt_profile
+    rendering_profile=str(cfg.get("rendering_profile") or DEFAULT_RENDERING_PROFILE)
+    context,context_stats=render_context_with_metadata(
+        bundles,
+        rendering_profile,
+        int(cfg.get("max_context_chars",24000)),
+        cfg.get("context_token_budget"),
+        compaction_profile=str(cfg.get("compaction_profile") or "none"),
+        max_sentences_per_bundle=int(cfg.get("max_sentences_per_bundle",3) or 3),
+        ace_renderer_variant=str(cfg.get("ace_renderer_variant") or "r0_current"),
+    )
+    return build_prompt(question, context, prompt_profile), prompt_profile, context, context_stats
 
 def extractive_fallback_answer(question: str, bundles: Sequence[Mapping[str,Any]]) -> str:
     cands=[]
@@ -102,18 +2079,31 @@ def _generate_vllm(prompt: str, cfg: Mapping[str,Any]) -> Dict[str,Any]:
     if cfg.get("stop"): req["stop"]=cfg.get("stop")
     if cfg.get("extra_body"): req["extra_body"]=dict(cfg.get("extra_body") or {})
     resp=client.chat.completions.create(**req); pred=resp.choices[0].message.content or ""; usage=getattr(resp,"usage",None)
-    return {"prediction":pred.strip(),"llm_provider":"vllm","model":model,"base_url":base_url,"usage":usage.model_dump() if hasattr(usage,"model_dump") else {}}
+    return {"raw_prediction":pred,"prediction":normalize_prediction_for_eval(pred),"llm_provider":"vllm","generation_provider":"vllm","model":model,"base_url":base_url,"usage":usage.model_dump() if hasattr(usage,"model_dump") else {}}
 
 def generate_answer(question: str, bundles: Sequence[Mapping[str,Any]], cfg: Mapping[str,Any]) -> Dict[str,Any]:
-    provider=str(cfg.get("provider","none")).lower(); prompt,prompt_profile=build_generation_prompt(question,bundles,cfg)
-    if provider in {"none","extractive","fallback","no-llm"}: return {"prediction":extractive_fallback_answer(question,bundles),"prompt":prompt,"prompt_profile":prompt_profile,"llm_provider":"extractive_fallback"}
+    provider=str(cfg.get("provider","none")).lower()
+    render_t0=time.perf_counter()
+    prompt,prompt_profile,rendered_context,context_stats=build_generation_prompt(question,bundles,cfg)
+    context_rendering_s=round(time.perf_counter()-render_t0,6)
+    rendering_profile=str(cfg.get("rendering_profile") or DEFAULT_RENDERING_PROFILE)
+    compaction_profile=str(context_stats.get("compaction_profile") or cfg.get("compaction_profile") or "none")
+    context_fields={"context_stats":context_stats,"compaction_profile":compaction_profile,**context_stats}
+    t0=time.perf_counter()
+    if provider in {"none","extractive","fallback","no-llm"}:
+        raw_prediction=extractive_fallback_answer(question,bundles)
+        generation_s=round(time.perf_counter()-t0,6)
+        return {"raw_prediction":raw_prediction,"prediction":normalize_prediction_for_eval(raw_prediction),"rendered_context":rendered_context,"prompt":prompt,"prompt_profile":prompt_profile,"rendering_profile":rendering_profile,**context_fields,"generation_latency_s":generation_s,"generation_stage_timings_s":{"context_rendering":context_rendering_s,"generation":generation_s},"llm_provider":"extractive_fallback","generation_provider":"extractive_fallback"}
     if provider=="vllm":
         last=None
         for attempt in range(int(cfg.get("retries",1))+1):
             try:
-                out=_generate_vllm(prompt,cfg); out["prompt"]=prompt if cfg.get("save_prompt",False) else None; out["prompt_profile"]=prompt_profile; return out
+                out=_generate_vllm(prompt,cfg)
+                generation_s=round(time.perf_counter()-t0,6)
+                out["prompt"]=prompt; out["rendered_context"]=rendered_context; out["prompt_profile"]=prompt_profile; out["rendering_profile"]=rendering_profile; out.update(context_fields); out["generation_latency_s"]=generation_s; out["generation_stage_timings_s"]={"context_rendering":context_rendering_s,"generation":generation_s}; return out
             except Exception as e:
                 last=e
                 if attempt<int(cfg.get("retries",1)): time.sleep(float(cfg.get("retry_sleep_s",2.0)))
-        raise RuntimeError(f"vLLM generation failed: {last!r}")
+        generation_s=round(time.perf_counter()-t0,6)
+        return {"raw_prediction":"","prediction":"","rendered_context":rendered_context,"prompt":prompt,"prompt_profile":prompt_profile,"rendering_profile":rendering_profile,**context_fields,"generation_latency_s":generation_s,"generation_stage_timings_s":{"context_rendering":context_rendering_s,"generation":generation_s},"llm_provider":"vllm","generation_provider":"vllm","generation_error":repr(last)}
     raise ValueError(f"Unsupported generation.provider={provider}")
