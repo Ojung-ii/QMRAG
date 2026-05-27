@@ -241,9 +241,52 @@ sed -n '1,220p' configs/SOTA_config/ace_rag_mainline/reported_results_n1000.md
 - The paper-facing ACE-RAG rows are all `n=1000`.
 - Smoke-test outputs are useful for CI or endpoint checks, but they should be
   labelled as smoke results in any table or output directory.
-- The final aggregate CSVs may contain older source strings from the run that
-  created them. Prefer the current paths listed in this document when checking
-  files on disk.
+- On 2026-05-27, code/docs/configs and text output metadata were checked for
+  legacy `EffiRAG`, `QMRAG`, `BRACE-RAG`, and `acerag` strings and normalized to
+  ACE-RAG naming. `HippoRAG2` remains only as a cited baseline method.
+- The SOTA output directories listed above were preserved during output cleanup.
 - Do not commit `outputs/`, `logs/`, model caches, datasets, or generated
   prediction files. Commit only configs, scripts, docs, and small source files
   needed to reproduce the runs.
+
+## Smoke Reproduction Check
+
+The SOTA compact replay path was revalidated after the rename cleanup with a
+small generation smoke test using vLLM at `--gpu-memory-utilization 0.25`.
+
+```bash
+CUDA_VISIBLE_DEVICES=0 conda run -n vllm vllm serve Qwen/Qwen2.5-7B-Instruct \
+  --host 127.0.0.1 --port 8025 --gpu-memory-utilization 0.25 \
+  --max-model-len 8192 --api-key EMPTY
+
+/home/ojungii/miniconda3/envs/effirag/bin/python scripts/replay_generation.py \
+  --predictions outputs/replay/20260526_074314/hotpotqa/common_qa_to_common_qa/predictions.jsonl \
+  --dataset hotpotqa \
+  --source-prompt common_qa \
+  --source-rendering-profile structured_chain \
+  --target-prompt common_qa \
+  --limit 20 \
+  --compaction-profile top3_chain_dedup \
+  --vllm-base-url http://127.0.0.1:8025/v1 \
+  --vllm-api-key EMPTY \
+  --vllm-model auto \
+  --temperature 0 \
+  --max-tokens 64 \
+  --output-root outputs/smoke_ace_rag_sota_repro_20260527
+```
+
+Smoke output:
+
+```text
+outputs/smoke_ace_rag_sota_repro_20260527/20260527_155006/hotpotqa/common_qa_to_common_qa_top3_top3_chain_dedup/predictions.jsonl
+```
+
+Compared with the preserved SOTA compact prefix:
+
+```text
+outputs/replay/20260526_074257/hotpotqa/common_qa_to_common_qa_top3_top3_chain_dedup/predictions.jsonl
+```
+
+Result: first 20 IDs matched, normalized predictions matched `20/20`, raw
+predictions matched `20/20`, and both runs produced `EM=0.3500`,
+`F1=0.4872`, and `context_tokens=479.4` on the smoke subset.
