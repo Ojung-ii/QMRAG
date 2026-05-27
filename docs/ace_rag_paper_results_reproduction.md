@@ -242,8 +242,8 @@ sed -n '1,220p' configs/SOTA_config/ace_rag_mainline/reported_results_n1000.md
 - Smoke-test outputs are useful for CI or endpoint checks, but they should be
   labelled as smoke results in any table or output directory.
 - On 2026-05-27, code/docs/configs and text output metadata were checked for
-  legacy `EffiRAG`, `QMRAG`, `BRACE-RAG`, and `acerag` strings and normalized to
-  ACE-RAG naming. `HippoRAG2` remains only as a cited baseline method.
+  legacy pre-ACE project strings and normalized to ACE-RAG naming. `HippoRAG2`
+  remains only as a cited baseline method.
 - The SOTA output directories listed above were preserved during output cleanup.
 - Do not commit `outputs/`, `logs/`, model caches, datasets, or generated
   prediction files. Commit only configs, scripts, docs, and small source files
@@ -259,7 +259,7 @@ CUDA_VISIBLE_DEVICES=0 conda run -n vllm vllm serve Qwen/Qwen2.5-7B-Instruct \
   --host 127.0.0.1 --port 8025 --gpu-memory-utilization 0.25 \
   --max-model-len 8192 --api-key EMPTY
 
-/home/ojungii/miniconda3/envs/effirag/bin/python scripts/replay_generation.py \
+python scripts/replay_generation.py \
   --predictions outputs/replay/20260526_074314/hotpotqa/common_qa_to_common_qa/predictions.jsonl \
   --dataset hotpotqa \
   --source-prompt common_qa \
