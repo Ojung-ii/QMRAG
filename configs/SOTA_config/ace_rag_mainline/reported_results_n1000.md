@@ -1,6 +1,6 @@
-# QMRAG v2 n=1000 Reported Results
+# ACE-RAG n=1000 Reported Results
 
-This file records the n=1000 result sources used by the reproducible QMRAG v2
+This file records the n=1000 result sources used by the reproducible ACE-RAG
 mainline config pack after the common-prompt compact replay and short-style
 prompt ablation.
 
@@ -12,10 +12,10 @@ prompt ablation.
 
 | Dataset | n | EM | F1 | Ans in Context | Ans in Pred | Insufficient | CtxTok | InputTok | TotalTok | EffectiveMs | Source |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| hotpotqa | 1000 | 0.372 | 0.4510 | 0.928 | 0.412 | 0.396 | 1700.4 | 1834.7 | 1839.3 | 561.5 | `outputs/hotpotqa/eval/20260525_095722_core_ablation_5proc_hotpotqa_core_qmrag_mainline_n1000/predictions.jsonl` |
-| 2wiki | 1000 | 0.144 | 0.1791 | 0.856 | 0.194 | 0.666 | 1727.3 | 1857.3 | 1861.5 | 414.4 | `outputs/2wiki/eval/20260525_095722_core_ablation_5proc_2wiki_core_qmrag_mainline_n1000/predictions.jsonl` |
-| popqa | 1000 | 0.405 | 0.5051 | 0.886 | 0.603 | 0.289 | 1724.3 | 1847.2 | 1851.7 | 440.1 | `outputs/popqa/eval/20260525_095722_core_ablation_5proc_popqa_core_qmrag_mainline_n1000/predictions.jsonl` |
-| musique | 1000 | 0.070 | 0.0917 | 0.636 | 0.106 | 0.860 | 2289.0 | 2423.5 | 2427.7 | 673.9 | `outputs/musique/eval/20260525_095722_core_ablation_5proc_musique_core_qmrag_mainline_n1000/predictions.jsonl` |
+| hotpotqa | 1000 | 0.372 | 0.4510 | 0.928 | 0.412 | 0.396 | 1700.4 | 1834.7 | 1839.3 | 561.5 | `outputs/hotpotqa/eval/20260525_095722_core_ablation_5proc_hotpotqa_core_ace_rag_mainline_n1000/predictions.jsonl` |
+| 2wiki | 1000 | 0.144 | 0.1791 | 0.856 | 0.194 | 0.666 | 1727.3 | 1857.3 | 1861.5 | 414.4 | `outputs/2wiki/eval/20260525_095722_core_ablation_5proc_2wiki_core_ace_rag_mainline_n1000/predictions.jsonl` |
+| popqa | 1000 | 0.405 | 0.5051 | 0.886 | 0.603 | 0.289 | 1724.3 | 1847.2 | 1851.7 | 440.1 | `outputs/popqa/eval/20260525_095722_core_ablation_5proc_popqa_core_ace_rag_mainline_n1000/predictions.jsonl` |
+| musique | 1000 | 0.070 | 0.0917 | 0.636 | 0.106 | 0.860 | 2289.0 | 2423.5 | 2427.7 | 673.9 | `outputs/musique/eval/20260525_095722_core_ablation_5proc_musique_core_ace_rag_mainline_n1000/predictions.jsonl` |
 
 ## ACE-RAG-Compact Common SOTA
 
@@ -42,7 +42,7 @@ recommended paper-facing compact profile.
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
 | metadata_only_compact | 0.3213 | +0.0988 | 1761.5 | 0.1974 | 12.6% | diagnostic only |
 | chain_dedup | 0.2758 | +0.0533 | 885.6 | 0.3246 | 53.7% | backup compact candidate |
-| top3_chain_dedup | 0.2648 | +0.0423 | 620.9 | 0.4528 | 68.0% | QMRAG-Compact-common candidate |
+| top3_chain_dedup | 0.2648 | +0.0423 | 620.9 | 0.4528 | 68.0% | ACE-RAG-Compact-common candidate |
 
 ## Native Prompt / Rendering SOTA
 
@@ -62,7 +62,7 @@ kept as an intermediate verification, not the final native SOTA.
 Method/native prompt results are prompt ablations and should be reported in an
 appendix or separate native-prompt table, not as the main fair-comparison row.
 
-| Dataset | common_qa F1 | strict_short_qa F1 | Delta | qmrag_bundle_qa F1 | qmrag_bundle_short_qa F1 | Delta |
+| Dataset | common_qa F1 | strict_short_qa F1 | Delta | ace_rag_bundle_qa F1 | ace_rag_bundle_short_qa F1 | Delta |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | hotpotqa | 0.4510 | 0.5481 | +0.0972 | 0.5246 | 0.5690 | +0.0444 |
 | 2wiki | 0.1791 | 0.3489 | +0.1697 | 0.2536 | 0.3819 | +0.1284 |
@@ -79,7 +79,7 @@ appendix or separate native-prompt table, not as the main fair-comparison row.
 - The compact quality drop is mostly evidence loss from context pruning, not a
   prompt-only issue; MuSiQue has the largest `Ans in Context` drop.
 - `strict_short_qa` improves over `common_qa` on all four datasets.
-- `qmrag_bundle_short_qa` improves the existing bundle prompt on three of four
+- `ace_rag_bundle_short_qa` improves the existing bundle prompt on three of four
   datasets and improves the average, but remains a method-prompt ablation.
 - Native generation timing should use the controlled GPU0 sequential rerun
   under `outputs/native_timing_controlled/20260526_gpu0_seq055_native_top8`.

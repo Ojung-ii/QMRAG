@@ -394,7 +394,7 @@ def write_markdown(
         "",
         "## Section 4. Interpretation",
         "",
-        f"- QMRAG-Compact-common main result usable: {fmt(interp.get('compact_main_success'))}.",
+        f"- ACE-RAG-Compact-common main result usable: {fmt(interp.get('compact_main_success'))}.",
         f"- Native prompt appendix candidate: {fmt(interp.get('native_appendix_candidate'))}.",
         f"- Budget scaling positive: {fmt(interp.get('budget_scaling_positive'))} ({interp.get('budget_scaling_positive_by_dataset')}).",
         f"- Sequential timing positive: {fmt(interp.get('runtime_positive'))} ({interp.get('runtime_positive_by_dataset')}).",

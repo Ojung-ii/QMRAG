@@ -53,7 +53,7 @@ for dataset in "${DATASETS[@]}"; do
       --prompt-profile common_qa \
       --rendering-profile structured_chain \
       --retrieval-variant full_hetero \
-      --seed-selection-variant top_relevance \
+      --seed-selection-variant global_seed_search \
       --residual-selection "$variant" \
       --enable-timing \
       "$@"; then

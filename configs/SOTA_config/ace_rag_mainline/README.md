@@ -1,8 +1,8 @@
-# QMRAG v2 Mainline SOTA Config Pack
+# ACE-RAG Mainline SOTA Config Pack
 
 ## Overview
 
-This directory freezes the reproducible QMRAG v2 mainline and its paper-facing ablations. It does not change retrieval logic, ranking, prompts, or prediction post-processing. It only records the selected settings and provides scripts to rerun them.
+This directory freezes the reproducible ACE-RAG mainline and its paper-facing ablations. It does not change retrieval logic, ranking, prompts, or prediction post-processing. It only records the selected settings and provides scripts to rerun them.
 
 ## Current Paper SOTA Snapshot
 
@@ -20,7 +20,7 @@ The compact common-prompt result is replayed from the full common retrieval
 source. That source uses `common_qa` + `structured_chain` + full context.
 
 - `retrieval_variant`: `full_hetero`
-- `seed_selection_variant`: `top_relevance`
+- `seed_selection_variant`: `global_seed_search`
 - `candidate_pool_size`: default/full, no candidate cap
 - `bridge.enabled`: `true`
 - `bridge.selection`: `residual_lexical`
@@ -38,16 +38,16 @@ context.
 Run:
 
 ```bash
-source configs/SOTA_config/qmrag_v2_mainline/env.example
-bash configs/SOTA_config/qmrag_v2_mainline/run_qmrag_v2_mainline.sh
+source configs/SOTA_config/ace_rag_mainline/env.example
+bash configs/SOTA_config/ace_rag_mainline/run_ace_rag_mainline.sh
 ```
 
 ## Prompt Ablation
 
-QMRAG-bundle is an ablation/upper-bound for structured evidence utilization. It uses the same retrieval, context, and rendering as mainline, but swaps the prompt profile to `qmrag_bundle_qa`.
+ACE-RAG-bundle is an ablation/upper-bound for structured evidence utilization. It uses the same retrieval, context, and rendering as mainline, but swaps the prompt profile to `ace_rag_bundle_qa`.
 
 ```bash
-bash configs/SOTA_config/qmrag_v2_mainline/run_qmrag_v2_prompt_ablation.sh
+bash configs/SOTA_config/ace_rag_mainline/run_ace_rag_prompt_ablation.sh
 ```
 
 ## Main Common-Prompt Compact Setting
@@ -60,13 +60,13 @@ retrieval is not rerun and `evidence_bundles_hash_match_rate` should remain
 `1.0`.
 
 ```bash
-bash configs/SOTA_config/qmrag_v2_mainline/run_qmrag_v2_compact_ablation.sh
+bash configs/SOTA_config/ace_rag_mainline/run_ace_rag_compact_ablation.sh
 ```
 
 Optional compact prompt ablations can be replayed by overriding the prompt list:
 
 ```bash
-TARGET_PROMPTS="common_qa qmrag_bundle_qa" bash configs/SOTA_config/qmrag_v2_mainline/run_qmrag_v2_compact_ablation.sh
+TARGET_PROMPTS="common_qa ace_rag_bundle_qa" bash configs/SOTA_config/ace_rag_mainline/run_ace_rag_compact_ablation.sh
 ```
 
 ## Runtime Ablation
@@ -74,7 +74,7 @@ TARGET_PROMPTS="common_qa qmrag_bundle_qa" bash configs/SOTA_config/qmrag_v2_mai
 Runtime ablation uses `candidate_pool_size=60` across all datasets. This is not the main default and should be reported separately as an efficiency/runtime ablation.
 
 ```bash
-bash configs/SOTA_config/qmrag_v2_mainline/run_qmrag_v2_runtime_ablation.sh
+bash configs/SOTA_config/ace_rag_mainline/run_ace_rag_runtime_ablation.sh
 ```
 
 ## Reproduction Commands
@@ -82,28 +82,28 @@ bash configs/SOTA_config/qmrag_v2_mainline/run_qmrag_v2_runtime_ablation.sh
 Dry-run commands:
 
 ```bash
-bash configs/SOTA_config/qmrag_v2_mainline/run_qmrag_v2_mainline.sh --dry-run
-bash configs/SOTA_config/qmrag_v2_mainline/run_qmrag_v2_prompt_ablation.sh --dry-run
-bash configs/SOTA_config/qmrag_v2_mainline/run_qmrag_v2_compact_ablation.sh --dry-run
-bash configs/SOTA_config/qmrag_v2_mainline/run_qmrag_v2_runtime_ablation.sh --dry-run
+bash configs/SOTA_config/ace_rag_mainline/run_ace_rag_mainline.sh --dry-run
+bash configs/SOTA_config/ace_rag_mainline/run_ace_rag_prompt_ablation.sh --dry-run
+bash configs/SOTA_config/ace_rag_mainline/run_ace_rag_compact_ablation.sh --dry-run
+bash configs/SOTA_config/ace_rag_mainline/run_ace_rag_runtime_ablation.sh --dry-run
 ```
 
 Final SOTA snapshot:
 
 ```bash
-cat configs/SOTA_config/qmrag_v2_mainline/ace_rag_current_sota.yaml
+cat configs/SOTA_config/ace_rag_mainline/ace_rag_current_sota.yaml
 ```
 
 Limit override:
 
 ```bash
-LIMIT=100 bash configs/SOTA_config/qmrag_v2_mainline/run_qmrag_v2_mainline.sh hotpotqa 2wiki
+LIMIT=100 bash configs/SOTA_config/ace_rag_mainline/run_ace_rag_mainline.sh hotpotqa 2wiki
 ```
 
 Collect summaries:
 
 ```bash
-bash configs/SOTA_config/qmrag_v2_mainline/collect_qmrag_v2_results.sh
+bash configs/SOTA_config/ace_rag_mainline/collect_ace_rag_results.sh
 ```
 
 ## Expected Outputs
@@ -122,7 +122,7 @@ Replay ablations write under `outputs/replay/{timestamp}/{dataset}/...`.
 ## What Not To Do
 
 - Do not change `common_qa` for main fair-comparison runs.
-- Do not use QMRAG-bundle as the main fair-comparison result.
+- Do not use ACE-RAG-bundle as the main fair-comparison result.
 - Do not report method-specific/native prompt rows as the main controlled
   comparison.
 - Do not use `p2_relaxed_chain` as the final native SOTA; use

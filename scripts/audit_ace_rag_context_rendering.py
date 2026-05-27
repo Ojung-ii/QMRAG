@@ -936,7 +936,7 @@ def run_reuse(args: argparse.Namespace) -> Path:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Post-hoc ACE-RAG context rendering audit over existing predictions.jsonl files.")
-    parser.add_argument("--input-root", default="outputs/acerag_native_final_verification/20260526_034219")
+    parser.add_argument("--input-root", default="outputs/ace_rag_native_final_verification/20260526_034219")
     parser.add_argument("--output-root", required=True)
     parser.add_argument("--datasets", nargs="+", default=["hotpotqa", "2wikimultihopqa"])
     parser.add_argument("--settings", nargs="+", default=["p2_relaxed_chain:8"])

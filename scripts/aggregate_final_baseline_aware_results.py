@@ -70,7 +70,7 @@ ACE_COMMON_COMPACT_PATHS = {
 }
 
 ACE_COMMON_SCALED_PATHS = {
-    ds: f"outputs/final_baseline_aware/20260526_053914/common_prompt/acerag_scaled_top8/{short}/common_qa/rag_summary.json"
+    ds: f"outputs/final_baseline_aware/20260526_053914/common_prompt/ace_rag_scaled_top8/{short}/common_qa/rag_summary.json"
     for ds, short in {
         "hotpotqa": "hotpotqa",
         "2wikimultihopqa": "2wiki",
@@ -82,8 +82,8 @@ ACE_COMMON_SCALED_PATHS = {
 ACE_NATIVE_P8_PATHS = {
     "hotpotqa": "outputs/hotpotqa_f1_sprint/20260526_051609/prompt_sprint_n1000/p8_r0_section_aware/rag_summary.json",
     "2wikimultihopqa": "outputs/hotpotqa_f1_sprint/20260526_051609/2wiki_sanity_n1000/p8_r0_section_aware/rag_summary.json",
-    "musique": "outputs/final_baseline_aware/20260526_053914/native_prompt/musique_acerag_p8_top8/p8_r0_section_aware/rag_summary.json",
-    "popqa": "outputs/final_baseline_aware/20260526_053914/native_prompt/popqa_acerag_p8_top8/p8_r0_section_aware/rag_summary.json",
+    "musique": "outputs/final_baseline_aware/20260526_053914/native_prompt/musique_ace_rag_p8_top8/p8_r0_section_aware/rag_summary.json",
+    "popqa": "outputs/final_baseline_aware/20260526_053914/native_prompt/popqa_ace_rag_p8_top8/p8_r0_section_aware/rag_summary.json",
 }
 
 
@@ -428,14 +428,14 @@ def main() -> None:
 
     write_wide_table(
         root,
-        "main_common_with_acerag_compact",
+        "main_common_with_ace_rag_compact",
         [r for r in common_rows if r["method"] != "ACE-RAG-Scaled"],
         "ContextTok",
         "\\caption{Main results under the common QA prompt. R@5, EM, and F1 are reported as percentages; CtxTok denotes average retrieved-context tokens.}",
     )
     write_wide_table(
         root,
-        "main_common_with_acerag_scaled",
+        "main_common_with_ace_rag_scaled",
         [r for r in common_rows if r["method"] != "ACE-RAG-Compact"],
         "ContextTok",
         "\\caption{Main results under the common QA prompt. R@5, EM, and F1 are reported as percentages; CtxTok denotes average retrieved-context tokens.}",

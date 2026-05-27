@@ -34,14 +34,14 @@ run_optional() {
 run_cmd python scripts/diagnose_predictions.py --latest
 
 for dataset in "${DATASETS[@]}"; do
-  run_cmd python scripts/evaluate_qmrag_retrieval_metrics.py \
+  run_cmd python scripts/evaluate_ace_rag_retrieval_metrics.py \
     --dataset "${dataset}" \
     --prompt-profile common_qa \
     --latest
   run_optional python scripts/compare_prompt_runs.py \
     --dataset "${dataset}" \
     --left-prompt common_qa \
-    --right-prompt qmrag_bundle_qa \
+    --right-prompt ace_rag_bundle_qa \
     --latest
 done
 

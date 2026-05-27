@@ -1,4 +1,4 @@
-name: QMRAG
+name: ACE-RAG
 channels:
   - pytorch
   - nvidia

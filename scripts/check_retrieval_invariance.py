@@ -175,7 +175,7 @@ def markdown(result: Mapping[str, Any]) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Check retrieval invariance between two QMRAG prediction files")
+    parser = argparse.ArgumentParser(description="Check retrieval invariance between two ACE-RAG prediction files")
     parser.add_argument("--before", required=True)
     parser.add_argument("--after", required=True)
     parser.add_argument("--output", default=None)

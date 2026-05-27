@@ -24,7 +24,7 @@ export VLLM_API_KEY="${VLLM_API_KEY:-EMPTY}"
 ANALYSIS_DIR="${ANALYSIS_DIR:-outputs/analysis/$(date +%Y%m%d_%H%M%S)_seed_selection}"
 mkdir -p "$ANALYSIS_DIR"
 
-VARIANTS=(medoid_current top_relevance anchor_first chain_potential)
+VARIANTS=(diverse_seed_search global_seed_search anchor_first chain_potential)
 
 echo "analysis_dir=$ANALYSIS_DIR limit=$LIMIT datasets=${DATASETS[*]} variants=${VARIANTS[*]}"
 

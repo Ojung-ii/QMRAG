@@ -1,7 +1,7 @@
 extends: ../default.yaml
 
 run:
-  ablation_variant: core_qmrag_mainline
+  ablation_variant: core_ace_rag_mainline
   enable_timing: true
 
 generation:
@@ -11,7 +11,7 @@ generation:
 
 retrieval:
   retrieval_variant: full_hetero
-  seed_selection_variant: top_relevance
+  seed_selection_variant: global_seed_search
   residual_selection: residual_lexical
   candidate_cap:
     enabled: false

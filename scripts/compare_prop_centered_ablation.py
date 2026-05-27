@@ -231,7 +231,7 @@ def latest_datasets(output_root: Path) -> list[str]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Compare QMRAG proposition-centered retrieval ablation variants")
+    parser = argparse.ArgumentParser(description="Compare ACE-RAG proposition-centered retrieval ablation variants")
     parser.add_argument("--dataset", default=None)
     parser.add_argument("--all-latest", action="store_true")
     parser.add_argument("--latest", action="store_true")

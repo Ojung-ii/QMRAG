@@ -55,7 +55,7 @@ def summarize_path(path: Path) -> dict[str, Any] | None:
         "dataset": str(first.get("dataset") or infer_dataset(path, [first])),
         "residual_selection_variant": residual_variant_from_rows([first]),
         "retrieval_variant": str(first.get("retrieval_variant") or diag.get("retrieval_variant") or "full_hetero"),
-        "seed_selection_variant": str(first.get("seed_selection_variant") or diag.get("seed_selection_variant") or "medoid_current"),
+        "seed_selection_variant": str(first.get("seed_selection_variant") or diag.get("seed_selection_variant") or "global_seed_search"),
         "candidate_cap_enabled": bool(diag.get("candidate_cap_enabled", False)),
         "prompt_profile": str(first.get("prompt_profile", "common_qa")),
         "rendering_profile": str(first.get("rendering_profile", "structured_chain")),
@@ -75,7 +75,7 @@ def find_latest_variant_run(output_root: Path, dataset: str, variant: str) -> Pa
             continue
         if summary["retrieval_variant"] != "full_hetero":
             continue
-        if summary["seed_selection_variant"] != "top_relevance":
+        if summary["seed_selection_variant"] != "global_seed_search":
             continue
         if summary.get("candidate_cap_enabled"):
             continue
@@ -264,7 +264,7 @@ def latest_datasets(output_root: Path) -> list[str]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Compare QMRAG residual bridge proposition selection variants")
+    parser = argparse.ArgumentParser(description="Compare ACE-RAG residual bridge proposition selection variants")
     parser.add_argument("--dataset", default=None)
     parser.add_argument("--all-latest", action="store_true")
     parser.add_argument("--latest", action="store_true")

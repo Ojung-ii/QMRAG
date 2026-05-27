@@ -18,8 +18,8 @@ from utils.io_utils import dump_json, ensure_dir, read_jsonl
 
 
 VARIANTS = (
-    "medoid_current",
-    "top_relevance",
+    "diverse_seed_search",
+    "global_seed_search",
     "anchor_first",
     "chain_potential",
 )
@@ -34,7 +34,7 @@ def infer_seed_variant(rows: Iterable[Mapping[str, Any]]) -> str:
         value = row.get("seed_selection_variant") or (row.get("retrieval_diagnostics", {}) or {}).get("seed_selection_variant")
         if value:
             return str(value)
-    return "medoid_current"
+    return "global_seed_search"
 
 
 def summarize_path(path: Path) -> dict[str, Any] | None:
@@ -223,7 +223,7 @@ def latest_datasets(output_root: Path) -> list[str]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Compare QMRAG seed selection ablation variants")
+    parser = argparse.ArgumentParser(description="Compare ACE-RAG seed selection ablation variants")
     parser.add_argument("--dataset", default=None)
     parser.add_argument("--all-latest", action="store_true")
     parser.add_argument("--latest", action="store_true")

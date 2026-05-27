@@ -10,12 +10,12 @@ from utils.generation import ACE_NATIVE_PROMPT_VARIANTS, ACE_RENDERER_VARIANTS, 
 from utils.indexing import LightweightEPCIndexer, ensure_mention_bridge_index
 from utils.embedding import build_or_load_dense_indexes
 from utils.io_utils import ExperimentLogger, dump_json, dump_yaml, ensure_dir, load_yaml, now_timestamp, to_jsonable
-from utils.retrieval import QueryMedoidRetriever
+from utils.retrieval import AceRagRetriever
 from utils.text import safe_truncate
 from utils.timing import TimingRecorder
 
 def parse_args():
-    p=argparse.ArgumentParser(description="QMRAG: Query-conditioned Medoid RAG runner")
+    p=argparse.ArgumentParser(description="ACE-RAG: answerable evidence-chain retrieval runner")
     p.add_argument("--config", default="config/default.yaml"); p.add_argument("--datasets", nargs="+", default=None); p.add_argument("--mode", choices=["all","index","eval"], default="all")
     p.add_argument("--timestamp", default=None); p.add_argument("--limit", type=int, default=None); p.add_argument("--corpus-limit", type=int, default=None); p.add_argument("--output-root", default=None)
     p.add_argument("--reindex", "--force-reindex", action="store_true", dest="reindex"); p.add_argument("--rebuild-embeddings", action="store_true")
@@ -27,7 +27,7 @@ def parse_args():
     p.add_argument("--rendering-profile", choices=sorted(RENDERING_PROFILES), default=None)
     p.add_argument("--compaction-profile", choices=sorted(COMPACTION_PROFILES), default=None)
     p.add_argument("--retrieval-variant", choices=["full_hetero","prop_text_only","prop_parent_anchor","prop_parent_mention_bidirectional"], default=None)
-    p.add_argument("--seed-selection-variant", choices=["medoid_current","top_relevance","anchor_first","chain_potential"], default=None)
+    p.add_argument("--seed-selection-variant", choices=["diverse_seed_search","global_seed_search","anchor_first","chain_potential"], default=None)
     p.add_argument("--residual-selection", choices=["residual_lexical","bridge_fullquery","residual_dense_only","residual_hybrid_lex_first","residual_dense_fallback","residual_unified_alignment"], default=None)
     p.add_argument("--ablation-variant", default=None)
     p.add_argument("--candidate-pool-size", type=int, default=None, help="Enable candidate cap ablation with this total candidate count.")
@@ -251,11 +251,11 @@ def prompt_experiment_type(prompt_profile: str, rendering_profile: str | None = 
         return "main_comparison"
     if prompt_profile=="strict_short_qa":
         return "format_ablation"
-    if prompt_profile in {"qmrag_compact_chain_qa","qmrag_compact_chain_light","qmrag_compact_chain_short_qa"}:
+    if prompt_profile in {"ace_rag_compact_chain_qa","ace_rag_compact_chain_light","ace_rag_compact_chain_short_qa"}:
         return "compact_prompt_ablation"
-    if prompt_profile.startswith("acerag_native_"):
+    if prompt_profile.startswith("ace_rag_native_"):
         return "ace_native_prompt_ablation"
-    if prompt_profile in {"qmrag_bundle_qa","qmrag_bundle_light","qmrag_bundle_tiny","qmrag_bundle_short_qa"}:
+    if prompt_profile in {"ace_rag_bundle_qa","ace_rag_bundle_light","ace_rag_bundle_tiny","ace_rag_bundle_short_qa"}:
         return "ablation"
     return "unknown"
 
@@ -296,7 +296,7 @@ def runtime_diagnostics_markdown(dataset: str, result: Mapping[str,Any], timing_
     metric_rows=[
         ("dataset",dataset),
         ("retrieval_variant",result.get("retrieval_variant","full_hetero")),
-        ("seed_selection_variant",result.get("seed_selection_variant","medoid_current")),
+        ("seed_selection_variant",result.get("seed_selection_variant","global_seed_search")),
         ("n",result.get("n",0)),
         ("retrieval_ms",f"{result.get('retrieval_latency_ms',0):.3f}"),
         ("seed_selection_ms",f"{result.get('seed_selection_ms',0):.3f}"),
@@ -395,8 +395,8 @@ def run_dataset(dataset: str, cfg: Dict[str,Any], args, timestamp: str):
     copy_compat_index(index_dir,compat_dir,logger)
     if args.mode=="index":
         timing.write_summary()
-        return {"dataset":dataset,"n":0,"status":"indexed","prompt_profile":prompt_profile,"rendering_profile":rendering_profile,"compaction_profile":compaction_profile,"retrieval_variant":str(cfg.get("retrieval",{}).get("retrieval_variant","full_hetero")),"seed_selection_variant":str(cfg.get("retrieval",{}).get("seed_selection_variant","medoid_current")),"index_dir":str(index_dir),**index_info,"index_meta":idx.get("meta",{})}
-    retriever=QueryMedoidRetriever(idx,cfg.get("retrieval",{}),dense_indexes,logger); preds=[]; pko=out_dir/"예측결과.jsonl"; pen=out_dir/"predictions.jsonl"
+        return {"dataset":dataset,"n":0,"status":"indexed","prompt_profile":prompt_profile,"rendering_profile":rendering_profile,"compaction_profile":compaction_profile,"retrieval_variant":str(cfg.get("retrieval",{}).get("retrieval_variant","full_hetero")),"seed_selection_variant":str(cfg.get("retrieval",{}).get("seed_selection_variant","global_seed_search")),"index_dir":str(index_dir),**index_info,"index_meta":idx.get("meta",{})}
+    retriever=AceRagRetriever(idx,cfg.get("retrieval",{}),dense_indexes,logger); preds=[]; pko=out_dir/"예측결과.jsonl"; pen=out_dir/"predictions.jsonl"
     for p in [pko,pen]:
         if p.exists(): p.unlink()
     with logger.time_block("run.examples", dataset=dataset, n=len(qas)):
@@ -416,7 +416,7 @@ def run_dataset(dataset: str, cfg: Dict[str,Any], args, timestamp: str):
                     row_rendering_profile=str(gen.get("rendering_profile",rendering_profile) or DEFAULT_RENDERING_PROFILE)
                     row_compaction_profile=str(gen.get("compaction_profile",compaction_profile) or "none")
                     retrieval_variant=str(cfg.get("retrieval",{}).get("retrieval_variant","full_hetero"))
-                    seed_selection_variant=str(cfg.get("retrieval",{}).get("seed_selection_variant","medoid_current"))
+                    seed_selection_variant=str(cfg.get("retrieval",{}).get("seed_selection_variant","global_seed_search"))
                     ret["diagnostics"]["ablation_variant"]=ablation_variant
                     row={"dataset":dataset,"id":qa.id,"question":qa.question,"raw_prediction":raw_prediction,"prediction":prediction,"answers":qa.answers,"support_titles":qa.support_titles,"support_facts":qa.support_facts,"prompt_profile":row_prompt_profile,"ace_native_prompt_variant":ace_native_prompt_variant or infer_ace_native_prompt_variant(row_prompt_profile),"ace_renderer_variant":str(gen.get("ace_renderer_variant") or ace_renderer_variant),"rendering_profile":row_rendering_profile,"compaction_profile":row_compaction_profile,"context_compaction_enabled":row_compaction_profile!="none","prompt_experiment_type":prompt_experiment_type(row_prompt_profile,row_rendering_profile),"retrieval_variant":retrieval_variant,"seed_selection_variant":seed_selection_variant,"ablation_variant":ablation_variant,"generation_provider":generation_provider,"evidence_bundles":ret["evidence_bundles"],"seeds":ret["seeds"],"retrieval_diagnostics":ret["diagnostics"],"generation_latency_s":float(gen.get("generation_latency_s",round(time.perf_counter()-t,6)) or 0.0),"llm_provider":generation_provider,"llm_model":gen.get("model"),"llm_usage":gen.get("usage")}
                     row.update(dict(gen.get("context_stats",{}) or {}))
@@ -426,7 +426,7 @@ def run_dataset(dataset: str, cfg: Dict[str,Any], args, timestamp: str):
                     logger.event({"event":"example.error","dataset":dataset,"qid":qa.id,"error":repr(e)})
                     if not args.continue_on_error: raise
                     generation_provider=cfg.get("generation",{}).get("provider")
-                    row={"dataset":dataset,"id":qa.id,"question":qa.question,"raw_prediction":"","prediction":"","answers":qa.answers,"support_titles":qa.support_titles,"prompt_profile":prompt_profile,"ace_native_prompt_variant":ace_native_prompt_variant or infer_ace_native_prompt_variant(prompt_profile),"ace_renderer_variant":ace_renderer_variant,"rendering_profile":rendering_profile,"compaction_profile":compaction_profile,"context_compaction_enabled":compaction_profile!="none","prompt_experiment_type":prompt_experiment_type(prompt_profile,rendering_profile),"retrieval_variant":str(cfg.get("retrieval",{}).get("retrieval_variant","full_hetero")),"seed_selection_variant":str(cfg.get("retrieval",{}).get("seed_selection_variant","medoid_current")),"ablation_variant":ablation_variant,"generation_provider":generation_provider,"error":repr(e),"evidence_bundles":[],"seeds":[],"retrieval_diagnostics":{"ablation_variant":ablation_variant,"candidate_count":0,"seed_count":0,"bundle_count":0,"context_tokens":0,"timings":{}},"generation_latency_s":0.0,"llm_provider":generation_provider}
+                    row={"dataset":dataset,"id":qa.id,"question":qa.question,"raw_prediction":"","prediction":"","answers":qa.answers,"support_titles":qa.support_titles,"prompt_profile":prompt_profile,"ace_native_prompt_variant":ace_native_prompt_variant or infer_ace_native_prompt_variant(prompt_profile),"ace_renderer_variant":ace_renderer_variant,"rendering_profile":rendering_profile,"compaction_profile":compaction_profile,"context_compaction_enabled":compaction_profile!="none","prompt_experiment_type":prompt_experiment_type(prompt_profile,rendering_profile),"retrieval_variant":str(cfg.get("retrieval",{}).get("retrieval_variant","full_hetero")),"seed_selection_variant":str(cfg.get("retrieval",{}).get("seed_selection_variant","global_seed_search")),"ablation_variant":ablation_variant,"generation_provider":generation_provider,"error":repr(e),"evidence_bundles":[],"seeds":[],"retrieval_diagnostics":{"ablation_variant":ablation_variant,"candidate_count":0,"seed_count":0,"bundle_count":0,"context_tokens":0,"timings":{}},"generation_latency_s":0.0,"llm_provider":generation_provider}
                     row=add_generation_logging_fields(row,{"rendered_context":"","prompt":""},cfg)
                 preds.append(row)
                 with timing.time_block(dataset=dataset, query_id=qa.id, stage="write_outputs", num_items_in=1) as twrite:
@@ -437,7 +437,7 @@ def run_dataset(dataset: str, cfg: Dict[str,Any], args, timestamp: str):
             log_retrieval_summary(preds,logger)
             res=evaluate_predictions(preds,dataset=dataset,prompt_profile=prompt_profile); res["index_dir"]=str(index_dir); res["index_source"]=index_info.get("index_source"); res["bridge_config"]=dict(cfg.get("retrieval",{}).get("bridge",{}) or {})
             res["retrieval_variant"]=str(cfg.get("retrieval",{}).get("retrieval_variant","full_hetero"))
-            res["seed_selection_variant"]=str(cfg.get("retrieval",{}).get("seed_selection_variant","medoid_current"))
+            res["seed_selection_variant"]=str(cfg.get("retrieval",{}).get("seed_selection_variant","global_seed_search"))
             res["ablation_variant"]=ablation_variant
             res["ace_native_prompt_variant"]=ace_native_prompt_variant or infer_ace_native_prompt_variant(prompt_profile)
             res["compaction_profile"]=compaction_profile
@@ -457,6 +457,6 @@ def main():
     for ds in datasets: rows.append(run_dataset(ds,cfg,args,timestamp))
     if rows:
         table=[]
-        for s in rows: table.append({"dataset":s.get("dataset"),"prompt":s.get("prompt_profile","-"),"n":s.get("n",0),"EM":f"{s.get('em',0):.4f}" if "em" in s else "-","F1":f"{s.get('f1',0):.4f}" if "f1" in s else "-","AnsContains":f"{s.get('answer_contains',0):.4f}" if "answer_contains" in s else "-","SupportRecall":f"{s.get('support_title_recall',0):.4f}" if "support_title_recall" in s else "-","SR/1kTok":f"{s.get('support_recall_per_1k_tokens',0):.4f}" if "support_recall_per_1k_tokens" in s else "-","CtxTok":f"{s.get('context_tokens',0):.1f}" if "context_tokens" in s else "-","LatencyMs":f"{s.get('latency_ms',0):.1f}" if "latency_ms" in s else "-","DenseRate":f"{s.get('dense_enabled_rate',0):.2f}" if "dense_enabled_rate" in s else "-"})
+        for s in rows: table.append({"dataset":s.get("dataset"),"prompt":s.get("prompt_profile","-"),"n":s.get("n",0),"run_scope":s.get("run_scope","full_run_n1000" if s.get("n") == 1000 else "smoke_test"),"EM":f"{s.get('em',0):.4f}" if "em" in s else "-","F1":f"{s.get('f1',0):.4f}" if "f1" in s else "-","AnsContains":f"{s.get('answer_contains',0):.4f}" if "answer_contains" in s else "-","SupportRecall":f"{s.get('support_title_recall',0):.4f}" if "support_title_recall" in s else "-","SR/1kTok":f"{s.get('support_recall_per_1k_tokens',0):.4f}" if "support_recall_per_1k_tokens" in s else "-","CtxTok":f"{s.get('context_tokens',0):.1f}" if "context_tokens" in s else "-","LatencyMs":f"{s.get('latency_ms',0):.1f}" if "latency_ms" in s else "-","DenseRate":f"{s.get('dense_enabled_rate',0):.2f}" if "dense_enabled_rate" in s else "-"})
         print("\n"+tabulate(table, headers="keys", tablefmt="github"))
 if __name__=="__main__": main()

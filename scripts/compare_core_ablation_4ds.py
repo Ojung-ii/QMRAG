@@ -19,7 +19,7 @@ from utils.io_utils import dump_json, ensure_dir, read_jsonl
 
 DATASETS = ("hotpotqa", "2wiki", "popqa", "musique")
 CORE_VARIANTS = (
-    "core_qmrag_mainline",
+    "core_ace_rag_mainline",
     "core_no_bridge",
     "core_bridge_fullquery",
     "core_residual_unified_alignment",
@@ -71,7 +71,7 @@ def summarize_path(path: Path) -> dict[str, Any] | None:
         "dataset": str(row.get("dataset") or infer_dataset(path, [row])),
         "ablation_variant": ablation_variant(row, path),
         "retrieval_variant": str(row.get("retrieval_variant") or diag.get("retrieval_variant") or "full_hetero"),
-        "seed_selection_variant": str(row.get("seed_selection_variant") or diag.get("seed_selection_variant") or "medoid_current"),
+        "seed_selection_variant": str(row.get("seed_selection_variant") or diag.get("seed_selection_variant") or "global_seed_search"),
         "prompt_profile": str(row.get("prompt_profile", "common_qa")),
         "rendering_profile": str(row.get("rendering_profile", "structured_chain")),
         "candidate_cap_enabled": bool(diag.get("candidate_cap_enabled", False)),
@@ -92,7 +92,7 @@ def find_latest_variant_run(output_root: Path, dataset: str, variant: str) -> Pa
             continue
         if info["retrieval_variant"] != "full_hetero":
             continue
-        if info["seed_selection_variant"] != "top_relevance":
+        if info["seed_selection_variant"] != "global_seed_search":
             continue
         if info["prompt_profile"] != "common_qa" or info["rendering_profile"] != "structured_chain":
             continue
@@ -160,7 +160,7 @@ def summarize_run(path: Path, dataset: str, variant: str) -> dict[str, Any]:
 def add_deltas(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     by_dataset: dict[str, dict[str, Any]] = {}
     for row in rows:
-        if row["ablation_variant"] == "core_qmrag_mainline":
+        if row["ablation_variant"] == "core_ace_rag_mainline":
             by_dataset[row["dataset"]] = row
     for row in rows:
         base = by_dataset.get(row["dataset"])
@@ -256,7 +256,7 @@ def interpretation(rows: list[Mapping[str, Any]]) -> list[str]:
 
 
 def markdown(rows: list[Mapping[str, Any]], missing: dict[str, list[str]]) -> str:
-    lines = ["# QMRAG Four-Dataset Core Ablation", ""]
+    lines = ["# ACE-RAG Four-Dataset Core Ablation", ""]
     if missing:
         lines.append("## Missing Variants")
         lines.append("")
@@ -343,7 +343,7 @@ def collect(output_root: Path, include_diagnostic: bool) -> tuple[list[dict[str,
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Compare four-dataset QMRAG core leave-one-out ablations.")
+    ap = argparse.ArgumentParser(description="Compare four-dataset ACE-RAG core leave-one-out ablations.")
     ap.add_argument("--output-root", default="outputs")
     ap.add_argument("--analysis-dir", default=None)
     ap.add_argument("--output", default=None)

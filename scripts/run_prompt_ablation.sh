@@ -16,7 +16,7 @@ fi
 
 RUN_ID="${RUN_ID:-$(date +%Y%m%d_%H%M%S)}"
 
-for PROFILE in common_qa qmrag_bundle_qa; do
+for PROFILE in common_qa ace_rag_bundle_qa; do
   echo "==> Running ${DATASET} with prompt_profile=${PROFILE}"
   bash scripts/run_dataset.sh "$DATASET" \
     --timestamp "${RUN_ID}_${PROFILE}" \

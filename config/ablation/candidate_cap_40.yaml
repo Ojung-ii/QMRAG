@@ -6,7 +6,7 @@ generation:
 
 retrieval:
   retrieval_variant: full_hetero
-  seed_selection_variant: medoid_current
+  seed_selection_variant: global_seed_search
   candidate_cap:
     enabled: true
     total_candidates: 40

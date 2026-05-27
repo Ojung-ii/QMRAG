@@ -69,7 +69,7 @@ def infer_seed_selection_variant(rows: Iterable[Dict[str, Any]]) -> str:
         value=row.get("seed_selection_variant") or (row.get("retrieval_diagnostics",{}) or {}).get("seed_selection_variant")
         if value:
             return str(value)
-    return "medoid_current"
+    return "global_seed_search"
 
 
 def iter_prediction_files(output_root: Path) -> Iterable[Path]:
@@ -106,10 +106,10 @@ def summarize_for_latest(path: Path) -> Dict[str, Any] | None:
 def latest_paths_by_dataset_prompt(rows: List[Dict[str, Any]]) -> List[Path]:
     latest: Dict[Tuple[str, str, str, str, str], Dict[str, Any]]={}
     for row in rows:
-        key=(str(row["dataset"]), str(row["prompt_profile"]), str(row["rendering_profile"]), str(row.get("retrieval_variant","full_hetero")), str(row.get("seed_selection_variant","medoid_current")))
+        key=(str(row["dataset"]), str(row["prompt_profile"]), str(row["rendering_profile"]), str(row.get("retrieval_variant","full_hetero")), str(row.get("seed_selection_variant","global_seed_search")))
         if key not in latest or float(row["mtime"]) > float(latest[key]["mtime"]):
             latest[key]=row
-    return [Path(x["path"]) for x in sorted(latest.values(), key=lambda r: (str(r["dataset"]), str(r["prompt_profile"]), str(r["rendering_profile"]), str(r.get("retrieval_variant","full_hetero")), str(r.get("seed_selection_variant","medoid_current"))))]
+    return [Path(x["path"]) for x in sorted(latest.values(), key=lambda r: (str(r["dataset"]), str(r["prompt_profile"]), str(r["rendering_profile"]), str(r.get("retrieval_variant","full_hetero")), str(r.get("seed_selection_variant","global_seed_search"))))]
 
 
 def summarize(path: Path) -> Dict[str, Any]:
@@ -190,10 +190,10 @@ def summarize(path: Path) -> Dict[str, Any]:
 def latest_by_dataset_prompt(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     latest: Dict[Tuple[str, str, str, str, str], Dict[str, Any]]={}
     for row in rows:
-        key=(str(row["dataset"]), str(row["prompt_profile"]), str(row["rendering_profile"]), str(row.get("retrieval_variant","full_hetero")), str(row.get("seed_selection_variant","medoid_current")))
+        key=(str(row["dataset"]), str(row["prompt_profile"]), str(row["rendering_profile"]), str(row.get("retrieval_variant","full_hetero")), str(row.get("seed_selection_variant","global_seed_search")))
         if key not in latest or float(row["mtime"]) > float(latest[key]["mtime"]):
             latest[key]=row
-    return sorted(latest.values(), key=lambda r: (str(r["dataset"]), str(r["prompt_profile"]), str(r["rendering_profile"]), str(r.get("retrieval_variant","full_hetero")), str(r.get("seed_selection_variant","medoid_current"))))
+    return sorted(latest.values(), key=lambda r: (str(r["dataset"]), str(r["prompt_profile"]), str(r["rendering_profile"]), str(r.get("retrieval_variant","full_hetero")), str(r.get("seed_selection_variant","global_seed_search"))))
 
 
 def markdown_table(rows: List[Dict[str, Any]]) -> str:
@@ -207,7 +207,7 @@ def markdown_table(rows: List[Dict[str, Any]]) -> str:
                 str(row["prompt_profile"]),
                 str(row["rendering_profile"]),
                 str(row.get("retrieval_variant","full_hetero")),
-                str(row.get("seed_selection_variant","medoid_current")),
+                str(row.get("seed_selection_variant","global_seed_search")),
                 str(row["prompt_experiment_type"]),
                 str(row["n"]),
                 f"{float(row['seed_title_rate']):.4f}",
@@ -265,7 +265,7 @@ def markdown_table(rows: List[Dict[str, Any]]) -> str:
 
 
 def main() -> None:
-    parser=argparse.ArgumentParser(description="Diagnose QMRAG prediction files.")
+    parser=argparse.ArgumentParser(description="Diagnose ACE-RAG prediction files.")
     parser.add_argument("--output-root", default="outputs")
     parser.add_argument("--dataset", default=None)
     parser.add_argument("--latest", action="store_true")

@@ -136,7 +136,7 @@ def evaluate_path(path: Path, analysis_dir: Path) -> dict[str, Any]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Analyze sentence count and duplicate structure inside QMRAG evidence bundles.")
+    parser = argparse.ArgumentParser(description="Analyze sentence count and duplicate structure inside ACE-RAG evidence bundles.")
     parser.add_argument("--predictions", default=None)
     parser.add_argument("--dataset", default=None)
     parser.add_argument("--prompt-profile", default=None)

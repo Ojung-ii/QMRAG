@@ -82,7 +82,7 @@ def find_latest(output_root: Path, dataset: str | None, prompt_profile: str | No
 
 
 def main() -> None:
-    parser=argparse.ArgumentParser(description="Inspect latest QMRAG prediction rows.")
+    parser=argparse.ArgumentParser(description="Inspect latest ACE-RAG prediction rows.")
     parser.add_argument("--output-root", default="outputs")
     parser.add_argument("--dataset", default=None)
     parser.add_argument("--prompt-profile", default=None)

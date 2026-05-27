@@ -19,7 +19,7 @@ from utils.io_utils import dump_json, ensure_dir, read_jsonl
 from utils.text import token_count
 
 
-PROMPT_ORDER = ("common_qa", "qmrag_bundle_tiny", "qmrag_bundle_light", "qmrag_bundle_qa")
+PROMPT_ORDER = ("common_qa", "ace_rag_bundle_tiny", "ace_rag_bundle_light", "ace_rag_bundle_qa")
 
 
 def now_timestamp() -> str:
@@ -116,7 +116,7 @@ def summarize_run(path: Path, dataset: str, prompt_profile: str) -> dict[str, An
 def add_deltas(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     by_prompt = {row["prompt_profile"]: row for row in rows}
     common = by_prompt.get("common_qa")
-    full = by_prompt.get("qmrag_bundle_qa")
+    full = by_prompt.get("ace_rag_bundle_qa")
     common_f1 = float(common.get("F1", 0.0)) if common else 0.0
     common_ins = float(common.get("insufficient_rate", 0.0)) if common else 0.0
     common_input = float(common.get("avg_input_prompt_tokens", 0.0)) if common else 0.0
@@ -176,13 +176,13 @@ def markdown_table(dataset: str, rows: list[Mapping[str, Any]]) -> str:
     for row in rows:
         lines.append("| " + " | ".join(fmt(row.get(h)) for h in headers) + " |")
     common = next((r for r in rows if r.get("prompt_profile") == "common_qa"), None)
-    full = next((r for r in rows if r.get("prompt_profile") == "qmrag_bundle_qa"), None)
+    full = next((r for r in rows if r.get("prompt_profile") == "ace_rag_bundle_qa"), None)
     lines.extend(["", "## Token Efficiency Notes", ""])
     if common and full:
         lines.append(f"- full_prompt_delta_F1_vs_common: {fmt(float(full.get('F1',0.0))-float(common.get('F1',0.0)))}")
         lines.append(f"- full_prompt_delta_input_tokens_vs_common: {fmt(float(full.get('avg_input_prompt_tokens',0.0))-float(common.get('avg_input_prompt_tokens',0.0)))}")
         lines.append(f"- full_prompt_F1_per_1k_input_tokens: {fmt(full.get('F1_per_1k_input_prompt_tokens'))}")
-    for profile in ("qmrag_bundle_tiny","qmrag_bundle_light"):
+    for profile in ("ace_rag_bundle_tiny","ace_rag_bundle_light"):
         row = next((r for r in rows if r.get("prompt_profile") == profile), None)
         if row:
             lines.append(f"- {profile}: retained_gain_vs_full={fmt(row.get('retained_gain_vs_full'))}, delta_input_tokens={fmt(row.get('delta_input_tokens_vs_common'))}, F1_per_1k_input_tokens={fmt(row.get('F1_per_1k_input_prompt_tokens'))}")
@@ -222,7 +222,7 @@ def latest_datasets(output_root: Path) -> list[str]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Compare prompt efficiency across QMRAG prompt profiles.")
+    parser = argparse.ArgumentParser(description="Compare prompt efficiency across ACE-RAG prompt profiles.")
     parser.add_argument("--dataset", default=None)
     parser.add_argument("--all-latest", action="store_true")
     parser.add_argument("--latest", action="store_true")

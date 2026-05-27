@@ -33,7 +33,7 @@ else
 fi
 
 CORE_VARIANTS=(
-  core_qmrag_mainline
+  core_ace_rag_mainline
   core_no_bridge
   core_bridge_fullquery
   core_residual_unified_alignment
@@ -94,13 +94,13 @@ for dataset in "${DATASETS[@]}"; do
       --prompt-profile common_qa \
       --rendering-profile structured_chain \
       --retrieval-variant full_hetero \
-      --seed-selection-variant top_relevance \
+      --seed-selection-variant global_seed_search \
       --ablation-variant "$variant" \
       --enable-timing \
       "${EXTRA_ARGS[@]}"; then
       echo "FAILED dataset=$dataset variant=$variant"
       FAILURES+=("${dataset}:${variant}")
-      if [[ "$variant" == "core_qmrag_mainline" ]]; then
+      if [[ "$variant" == "core_ace_rag_mainline" ]]; then
         printf '%s\n' "${FAILURES[@]}" > "$ANALYSIS_DIR/failed_variants.txt"
         echo "mainline failed; aborting core ablation run"
         exit 1

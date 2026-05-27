@@ -30,8 +30,8 @@ BEST_BASELINES = {
 TARGET_PROMPTS = {
     "common_qa",
     "strict_short_qa",
-    "qmrag_bundle_short_qa",
-    "qmrag_compact_chain_short_qa",
+    "ace_rag_bundle_short_qa",
+    "ace_rag_compact_chain_short_qa",
 }
 TARGET_COMPACTIONS = {
     "none",
@@ -108,9 +108,9 @@ def has_truncation(row: Mapping[str, Any]) -> bool:
 def source_preference(row: Mapping[str, Any]) -> int:
     ablation = str(row.get("ablation_variant") or "")
     residual = str((row.get("retrieval_diagnostics", {}) or {}).get("residual_selection_variant") or row.get("residual_selection_variant") or "")
-    if ablation in {"", "core_qmrag_mainline"} and residual in {"", "residual_lexical"}:
+    if ablation in {"", "core_ace_rag_mainline"} and residual in {"", "residual_lexical"}:
         return 2
-    if ablation in {"", "core_qmrag_mainline"}:
+    if ablation in {"", "core_ace_rag_mainline"}:
         return 1
     return 0
 
@@ -211,11 +211,11 @@ def eval_rows(rows: Sequence[Mapping[str, Any]], dataset: str, prompt: str) -> d
 def row_mode(prompt: str, compaction: str) -> str:
     if prompt == "common_qa" and compaction == "none":
         return "full_common"
-    if prompt == "qmrag_bundle_qa" and compaction == "none":
+    if prompt == "ace_rag_bundle_qa" and compaction == "none":
         return "full_bundle"
     if prompt == "strict_short_qa":
         return "full_strict_short"
-    if prompt == "qmrag_bundle_short_qa" and compaction == "none":
+    if prompt == "ace_rag_bundle_short_qa" and compaction == "none":
         return "full_bundle_short"
     if prompt == "common_qa":
         return "common_compact"
@@ -310,7 +310,7 @@ def metric_row(
     common_overlap, _ = overlap_rows(full_common_rows, rows)
     bundle_overlap, _ = overlap_rows(full_bundle_rows, rows) if full_bundle_rows else ([], [])
     common_eval = eval_rows(common_overlap, dataset, "common_qa") if common_overlap else {}
-    bundle_eval = eval_rows(bundle_overlap, dataset, "qmrag_bundle_qa") if bundle_overlap else {}
+    bundle_eval = eval_rows(bundle_overlap, dataset, "ace_rag_bundle_qa") if bundle_overlap else {}
     counts = compare_counts(full_common_rows, rows)
     baseline = BEST_BASELINES[dataset]
     f1 = float(ev.get("f1", 0.0) or 0.0)
@@ -324,7 +324,7 @@ def metric_row(
     full_common_effective_total_ms = source_retrieval_ms + full_common_generation_ms
     native_prompt_success = (
         (prompt == "strict_short_qa" and compaction == "none" and delta_common is not None and delta_common >= 0.0)
-        or (prompt == "qmrag_bundle_short_qa" and compaction == "none" and delta_bundle is not None and delta_bundle >= 0.0)
+        or (prompt == "ace_rag_bundle_short_qa" and compaction == "none" and delta_bundle is not None and delta_bundle >= 0.0)
     )
     common_success = prompt == "common_qa" and compaction != "none" and f1 > float(baseline["f1"]) and input_tok <= 1000.0
     aggressive_success = prompt == "common_qa" and compaction != "none" and f1 > float(baseline["f1"]) and input_tok <= 800.0
@@ -375,7 +375,7 @@ def metric_row(
         "aggressive_common_compact_success": aggressive_success,
         "native_compact_success": prompt != "common_qa" and compaction != "none" and input_tok <= 1000.0 and delta_bundle is not None and delta_bundle >= -0.06,
         "native_prompt_success": native_prompt_success,
-        "qmrag_compact_paper_candidate": common_success or aggressive_success,
+        "ace_rag_compact_paper_candidate": common_success or aggressive_success,
         "qmrang_compact_paper_candidate": common_success or aggressive_success,
         "strict_prompt_helpful": False,
         "path": str(path) if path else None,
@@ -430,7 +430,7 @@ def baseline_row(dataset: str) -> dict[str, Any]:
         "aggressive_common_compact_success": False,
         "native_compact_success": False,
         "native_prompt_success": False,
-        "qmrag_compact_paper_candidate": False,
+        "ace_rag_compact_paper_candidate": False,
         "qmrang_compact_paper_candidate": False,
         "strict_prompt_helpful": False,
         "path": None,
@@ -441,7 +441,7 @@ def build_dataset_summary(root: Path, dataset: str) -> dict[str, Any]:
     full_common_path = find_full_run(root, dataset, "common_qa")
     if full_common_path is None:
         raise SystemExit(f"No full common_qa run found for dataset={dataset}")
-    full_bundle_path = find_full_run(root, dataset, "qmrag_bundle_qa")
+    full_bundle_path = find_full_run(root, dataset, "ace_rag_bundle_qa")
     full_common_rows = read_jsonl(full_common_path)
     full_bundle_rows = read_jsonl(full_bundle_path) if full_bundle_path else []
     rows = [
@@ -449,7 +449,7 @@ def build_dataset_summary(root: Path, dataset: str) -> dict[str, Any]:
         baseline_row(dataset),
     ]
     if full_bundle_rows:
-        rows.append(metric_row(dataset, full_bundle_path, full_bundle_rows, full_common_rows, full_bundle_rows, "qmrag_bundle_qa", "none", "full_bundle"))
+        rows.append(metric_row(dataset, full_bundle_path, full_bundle_rows, full_common_rows, full_bundle_rows, "ace_rag_bundle_qa", "none", "full_bundle"))
     replay_payloads = [(path, read_jsonl(path)) for path in find_latest_replays(root, dataset)]
     max_replay_n = max((len(replay_rows) for _, replay_rows in replay_payloads), default=0)
     if max_replay_n >= 1000:
@@ -479,7 +479,7 @@ def build_dataset_summary(root: Path, dataset: str) -> dict[str, Any]:
         "rows": rows,
         "interpretation": {
             "strict_short_qa_beats_common_qa": bool(full_strict and full_strict.get("strict_prompt_helpful")),
-            "qmrag_bundle_short_qa_beats_qmrag_bundle_qa": bool(full_bundle and full_bundle_short and float(full_bundle_short["F1"]) > float(full_bundle["F1"])),
+            "ace_rag_bundle_short_qa_beats_ace_rag_bundle_qa": bool(full_bundle and full_bundle_short and float(full_bundle_short["F1"]) > float(full_bundle["F1"])),
             "common_prompt_compact_beats_best_baseline": bool(common_success),
             "aggressive_common_prompt_compact_beats_best_baseline": bool(aggressive_success),
             "native_compact_recovers_performance": bool(native_success),
@@ -574,22 +574,22 @@ def markdown(summaries: Sequence[Mapping[str, Any]]) -> str:
                 "### Interpretation",
                 "",
                 f"1. strict_short_qa better than common_qa: {fmt(interp.get('strict_short_qa_beats_common_qa'))}",
-                f"2. qmrag_bundle_short_qa better than qmrag_bundle_qa: {fmt(interp.get('qmrag_bundle_short_qa_beats_qmrag_bundle_qa'))}",
+                f"2. ace_rag_bundle_short_qa better than ace_rag_bundle_qa: {fmt(interp.get('ace_rag_bundle_short_qa_beats_ace_rag_bundle_qa'))}",
                 f"3. common prompt compact beats best baseline: {fmt(interp.get('common_prompt_compact_beats_best_baseline'))}",
                 f"4. aggressive compact beats best baseline: {fmt(interp.get('aggressive_common_prompt_compact_beats_best_baseline'))}",
                 f"5. native compact prompt recovers compact performance: {fmt(interp.get('native_compact_recovers_performance'))}",
-                f"6. QMRAG-Compact paper candidates: {', '.join(interp.get('paper_candidate_profiles') or []) or 'none'}",
+                f"6. ACE-RAG-Compact paper candidates: {', '.join(interp.get('paper_candidate_profiles') or []) or 'none'}",
                 f"7. Aggressive candidates: {', '.join(interp.get('aggressive_paper_candidate_profiles') or []) or 'none'}",
                 f"8. Native prompt successes: {', '.join(interp.get('native_prompt_success_profiles') or []) or 'none'}",
                 "",
                 "### N1000 Decision Notes",
                 "",
-                f"- QMRAG-Compact-common candidates: {candidate_names}",
+                f"- ACE-RAG-Compact-common candidates: {candidate_names}",
                 f"- Best-baseline margins: {candidate_margins}",
                 f"- Token reduction: {candidate_token_down}",
                 f"- F1/1K input: {candidate_f1_per_input}",
                 f"- strict_short_qa effect: {fmt(strict_row.get('delta_F1_vs_full_common') if strict_row else None)}",
-                f"- qmrag_bundle_short_qa effect: {fmt(bundle_short_row.get('delta_F1_vs_full_bundle') if bundle_short_row else None)}",
+                f"- ace_rag_bundle_short_qa effect: {fmt(bundle_short_row.get('delta_F1_vs_full_bundle') if bundle_short_row else None)}",
                 "- Method/native prompt results should remain appendix unless the effect is consistently positive across datasets.",
                 "- Failed profiles are those with negative margin, InputTok > 1000 for common compact, or increased insufficient/evidence loss.",
                 "",
@@ -644,7 +644,7 @@ def markdown(summaries: Sequence[Mapping[str, Any]]) -> str:
                         fmt(row.get("native_prompt_success")),
                         fmt(row.get("native_compact_success")),
                         fmt(row.get("strict_prompt_helpful")),
-                        fmt(row.get("qmrag_compact_paper_candidate")),
+                        fmt(row.get("ace_rag_compact_paper_candidate")),
                     ]
                 )
                 + " |"

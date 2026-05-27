@@ -299,7 +299,7 @@ class RetrievalDiagnostics:
     dense_enabled: bool
 
 
-class QueryMedoidRetriever:
+class AceRagRetriever:
     def __init__(self, index: Mapping[str, Any], cfg: Mapping[str, Any], dense_indexes: Optional[Mapping[str, DenseIndex]] = None, logger: Optional[Any] = None):
         self.index = index
         self.cfg = cfg
@@ -307,8 +307,8 @@ class QueryMedoidRetriever:
         self.retrieval_variant = str(cfg.get("retrieval_variant", "full_hetero") or "full_hetero")
         if self.retrieval_variant not in {"full_hetero", "prop_text_only", "prop_parent_anchor", "prop_parent_mention_bidirectional"}:
             raise ValueError(f"Unsupported retrieval_variant={self.retrieval_variant!r}")
-        self.seed_selection_variant = str(cfg.get("seed_selection_variant", "medoid_current") or "medoid_current")
-        if self.seed_selection_variant not in {"medoid_current", "top_relevance", "anchor_first", "chain_potential"}:
+        self.seed_selection_variant = str(cfg.get("seed_selection_variant", "global_seed_search") or "global_seed_search")
+        if self.seed_selection_variant not in {"diverse_seed_search", "global_seed_search", "anchor_first", "chain_potential"}:
             raise ValueError(f"Unsupported seed_selection_variant={self.seed_selection_variant!r}")
         self.bridge_cfg=dict(cfg.get("bridge",{}) or {})
         self.residual_selection_variant = str(
@@ -435,7 +435,7 @@ class QueryMedoidRetriever:
                 ),
             },
         )
-        wall0=time.time(); t0 = time.perf_counter(); seeds = self._select_seeds(candidates); elapsed=time.perf_counter() - t0; timings["seed_selection_s"] = elapsed; timings["medoid_seeding_s"] = elapsed
+        wall0=time.time(); t0 = time.perf_counter(); seeds = self._select_seeds(candidates); elapsed=time.perf_counter() - t0; timings["seed_selection_s"] = elapsed; timings[f"{self.seed_selection_variant}_s"] = elapsed
         record_stage(
             "seed_selection",
             wall0,
@@ -945,7 +945,7 @@ class QueryMedoidRetriever:
             return self._apply_candidate_cap(candidates, max(top_k, int(self.cfg.get("min_candidate_pool", top_k))))
         return candidates[: max(top_k, int(self.cfg.get("min_candidate_pool", top_k)))]
 
-    def _sampled_medoid_seeding(self, candidates: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    def _sampled_diverse_seed_search(self, candidates: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
         if not candidates: return []
         seed_count = min(int(self.cfg.get("seed_count", 4)), len(candidates))
         trials = int(self.cfg.get("seed_trials", 7)); sample_multiplier = int(self.cfg.get("sample_multiplier", 6))
@@ -971,7 +971,7 @@ class QueryMedoidRetriever:
 
     def _ranked_seed_selection(self, candidates: Sequence[Mapping[str, Any]], variant: str) -> List[Dict[str, Any]]:
         seed_count = min(int(self.cfg.get("seed_count", 4)), len(candidates))
-        if variant == "top_relevance":
+        if variant == "global_seed_search":
             key = lambda c: (float(c.get("score", 0.0) or 0.0), -float(c.get("tokens", 0.0) or 0.0))
         elif variant == "anchor_first":
             key = lambda c: (
@@ -998,10 +998,10 @@ class QueryMedoidRetriever:
     def _select_seeds(self, candidates: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
         if not candidates:
             return []
-        if self.seed_selection_variant == "medoid_current":
-            seeds = self._sampled_medoid_seeding(candidates)
+        if self.seed_selection_variant == "diverse_seed_search":
+            seeds = self._sampled_diverse_seed_search(candidates)
             for seed in seeds:
-                seed["seed_selection_variant"] = "medoid_current"
+                seed["seed_selection_variant"] = "diverse_seed_search"
             return seeds
         return self._ranked_seed_selection(candidates, self.seed_selection_variant)
 

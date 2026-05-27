@@ -10,7 +10,7 @@ generation:
 
 retrieval:
   retrieval_variant: full_hetero
-  seed_selection_variant: top_relevance
+  seed_selection_variant: global_seed_search
   residual_selection: bridge_fullquery
   candidate_cap:
     enabled: false

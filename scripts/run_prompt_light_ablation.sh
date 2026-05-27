@@ -20,7 +20,7 @@ fi
 echo "analysis_dir=$ANALYSIS_DIR limit=$LIMIT datasets=${DATASETS[*]}"
 
 for dataset in "${DATASETS[@]}"; do
-  for prompt in qmrag_bundle_tiny qmrag_bundle_light qmrag_bundle_qa; do
+  for prompt in ace_rag_bundle_tiny ace_rag_bundle_light ace_rag_bundle_qa; do
     python scripts/replay_generation.py \
       --dataset "$dataset" \
       --source-prompt common_qa \
@@ -35,7 +35,7 @@ for dataset in "${DATASETS[@]}"; do
     --latest \
     --analysis-dir "$ANALYSIS_DIR"
 
-  python scripts/evaluate_qmrag_retrieval_metrics.py \
+  python scripts/evaluate_ace_rag_retrieval_metrics.py \
     --dataset "$dataset" \
     --prompt-profile common_qa \
     --latest \

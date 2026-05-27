@@ -17,7 +17,7 @@ DEFAULT_PATH = "/home/dilab/.cache/huggingface/models--nvidia--NV-Embed-v2/snaps
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Check local NV-Embed-v2 dependency and loadability for QMRAG.")
+    ap = argparse.ArgumentParser(description="Check local NV-Embed-v2 dependency and loadability for ACE-RAG.")
     ap.add_argument("--model-path", default=os.environ.get("NVEMBED_MODEL_PATH", DEFAULT_PATH))
     ap.add_argument("--device", default=os.environ.get("EMBED_DEVICE", "cuda"))
     ap.add_argument("--skip-load", action="store_true", help="Only check versions and local files.")

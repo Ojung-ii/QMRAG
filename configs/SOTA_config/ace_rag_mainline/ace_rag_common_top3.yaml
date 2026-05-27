@@ -1,4 +1,4 @@
-extends: qmrag_v2_common_full.yaml
+extends: ace_rag_common_full.yaml
 
 generation:
   prompt_profile: common_qa

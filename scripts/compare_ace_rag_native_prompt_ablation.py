@@ -448,7 +448,7 @@ def latex_sensitivity_table(rows: Sequence[Mapping[str, Any]]) -> str:
             "\\bottomrule",
             "\\end{tabular}",
             "\\caption{ACE-RAG native-prompt sensitivity on HotpotQA and 2Wiki. Relaxing chain-position assumptions and allowing Supporting Evidence as direct answer evidence improve native QA performance. Increasing the rendered evidence bundles further improves absolute F1, while compact prompts remain more token-efficient.}",
-            "\\label{tab:acerag_native_prompt_sensitivity}",
+            "\\label{tab:ace_rag_native_prompt_sensitivity}",
             "\\end{table}",
             "",
         ]
@@ -478,7 +478,7 @@ def latex_appendix_table(rows: Sequence[Mapping[str, Any]]) -> str:
             "\\bottomrule",
             "\\end{tabular}",
             "\\caption{Native-prompt results with method-specific QA prompts. ACE-RAG uses the relaxed chain prompt with top-8 rendered evidence bundles. Tok. denotes average prompt tokens, including retrieved context and prompt text.}",
-            "\\label{tab:acerag_native_appendix_updated}",
+            "\\label{tab:ace_rag_native_appendix_updated}",
             "\\end{table*}",
             "",
         ]
@@ -597,7 +597,7 @@ def write_markdown(path: Path, root: Path, rows: Sequence[dict[str, Any]]) -> No
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Aggregate ACE-RAG native prompt ablation runs.")
-    parser.add_argument("--root", default="outputs/acerag_native_prompt_ablation")
+    parser.add_argument("--root", default="outputs/ace_rag_native_prompt_ablation")
     parser.add_argument("--print-best", action="store_true")
     args = parser.parse_args()
 

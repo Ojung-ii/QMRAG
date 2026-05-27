@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -lt 2 || $# -gt 3 ]]; then
-  echo "Usage: bash scripts/run_safe_compact_ablation.sh <hotpotqa|2wiki|popqa|musique|all> <common_qa|qmrag_bundle_qa> [limit]" >&2
+  echo "Usage: bash scripts/run_safe_compact_ablation.sh <hotpotqa|2wiki|popqa|musique|all> <common_qa|ace_rag_bundle_qa> [limit]" >&2
   exit 1
 fi
 
@@ -10,7 +10,7 @@ DATASET_ARG="$1"
 PROMPT_PROFILE="$2"
 LIMIT="${3:-100}"
 
-if [[ "$PROMPT_PROFILE" != "common_qa" && "$PROMPT_PROFILE" != "qmrag_bundle_qa" ]]; then
+if [[ "$PROMPT_PROFILE" != "common_qa" && "$PROMPT_PROFILE" != "ace_rag_bundle_qa" ]]; then
   echo "Unsupported prompt_profile: $PROMPT_PROFILE" >&2
   exit 1
 fi

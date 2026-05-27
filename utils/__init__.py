@@ -1,1 +1,1 @@
-"""Utilities for PAMAE-inspired lightweight GraphRAG experiments."""
+"""Utilities for ACE-RAG lightweight GraphRAG experiments."""

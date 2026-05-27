@@ -56,7 +56,7 @@ def latest_reference_run(output_root: Path, dataset: str) -> Path | None:
             continue
         if summary.get("prompt_experiment_type") not in {"", "main_comparison"}:
             continue
-        if summary["retrieval_variant"] != "full_hetero" or summary["seed_selection_variant"] != "medoid_current":
+        if summary["retrieval_variant"] != "full_hetero" or summary["seed_selection_variant"] != "global_seed_search":
             continue
         if summary.get("candidate_cap_enabled"):
             continue
@@ -169,7 +169,7 @@ def build_report(datasets: Iterable[str], output_root: Path) -> str:
     lines.extend([
         "## Recommendation Notes",
         "",
-        "- Keep default accuracy setting at full_hetero + medoid_current until candidate cap and seed simplification preserve F1 at n=100+.",
+        "- Keep default accuracy setting at full_hetero + global_seed_search until candidate cap and seed simplification preserve F1 at n=100+.",
         "- Treat candidate caps and simplified seed selection as ablation flags, not default changes.",
         "- Use context-budget/top-bundle replay results as separate context cost ablations because they do not change retrieval runtime.",
         "",
@@ -178,7 +178,7 @@ def build_report(datasets: Iterable[str], output_root: Path) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Write a compact runtime optimization summary from latest QMRAG outputs")
+    parser = argparse.ArgumentParser(description="Write a compact runtime optimization summary from latest ACE-RAG outputs")
     parser.add_argument("--datasets", nargs="+", default=["hotpotqa", "2wiki"])
     parser.add_argument("--output-root", default="outputs")
     parser.add_argument("--analysis-dir", default=None)

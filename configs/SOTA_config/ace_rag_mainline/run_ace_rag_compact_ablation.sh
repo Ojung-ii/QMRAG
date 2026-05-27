@@ -21,8 +21,8 @@ fi
 
 cd "${ROOT_DIR}"
 
-echo "[QMRAG v2 compact ablation] Uses replay_generation.py with --compaction-profile ${COMPACTION_PROFILE}."
-echo "[QMRAG v2 compact ablation] Retrieval is not rerun; require evidence_bundles_hash_match_rate=1.0."
+echo "[ACE-RAG compact ablation] Uses replay_generation.py with --compaction-profile ${COMPACTION_PROFILE}."
+echo "[ACE-RAG compact ablation] Retrieval is not rerun; require evidence_bundles_hash_match_rate=1.0."
 
 for dataset in "${DATASETS[@]}"; do
   for target_prompt in "${TARGET_PROMPTS_ARRAY[@]}"; do
@@ -36,7 +36,7 @@ for dataset in "${DATASETS[@]}"; do
       --limit "${LIMIT}"
       --compaction-profile "${COMPACTION_PROFILE}"
     )
-    echo "[QMRAG v2 compact ${dataset} ${target_prompt}] ${cmd[*]}"
+    echo "[ACE-RAG compact ${dataset} ${target_prompt}] ${cmd[*]}"
     if [[ "${DRY_RUN}" == "false" ]]; then
       "${cmd[@]}"
     fi

@@ -72,21 +72,21 @@ base=[
 ]
 core=[
     ("chain_schema_k3","common_qa","compact_common"),
-    ("chain_schema_k3","qmrag_compact_chain_qa","compact_prompt"),
-    ("chain_schema_k3","qmrag_compact_chain_light","compact_light"),
-    ("chain_schema_plus1_k3","qmrag_compact_chain_qa","compact_plus1"),
-    ("chain_schema_k5","qmrag_compact_chain_qa","compact_k5"),
-    ("top3_schema_dedup","qmrag_compact_chain_qa","top3_schema"),
+    ("chain_schema_k3","ace_rag_compact_chain_qa","compact_prompt"),
+    ("chain_schema_k3","ace_rag_compact_chain_light","compact_light"),
+    ("chain_schema_plus1_k3","ace_rag_compact_chain_qa","compact_plus1"),
+    ("chain_schema_k5","ace_rag_compact_chain_qa","compact_k5"),
+    ("top3_schema_dedup","ace_rag_compact_chain_qa","top3_schema"),
 ]
 aggressive=[
-    ("chain_schema_k2","qmrag_compact_chain_qa","compact_k2"),
-    ("chain_schema_plus1_k2","qmrag_compact_chain_qa","compact_plus1_k2"),
+    ("chain_schema_k2","ace_rag_compact_chain_qa","compact_k2"),
+    ("chain_schema_plus1_k2","ace_rag_compact_chain_qa","compact_plus1_k2"),
 ]
 recommended=[
     ("none","strict_short_qa","format"),
-    ("chain_schema_k3","qmrag_compact_chain_qa","compact_prompt"),
-    ("chain_schema_plus1_k3","qmrag_compact_chain_qa","compact_plus1"),
-    ("top3_schema_dedup","qmrag_compact_chain_qa","top3_schema"),
+    ("chain_schema_k3","ace_rag_compact_chain_qa","compact_prompt"),
+    ("chain_schema_plus1_k3","ace_rag_compact_chain_qa","compact_plus1"),
+    ("top3_schema_dedup","ace_rag_compact_chain_qa","top3_schema"),
 ]
 profiles = recommended if mode=="--recommended-only" else base+core+(aggressive if mode=="--include-aggressive" else [])
 job_id=0
@@ -155,7 +155,7 @@ python scripts/compare_compact_chain_prompt_runs.py --all-latest --analysis-dir 
 for dataset in hotpotqa 2wiki popqa musique; do
   python scripts/diagnose_output_format.py --dataset "$dataset" --prompt-profile common_qa --latest --analysis-dir "$ANALYSIS_DIR" | tee -a "$MASTER_LOG"
   python scripts/diagnose_output_format.py --dataset "$dataset" --prompt-profile strict_short_qa --latest --analysis-dir "$ANALYSIS_DIR" | tee -a "$MASTER_LOG"
-  python scripts/diagnose_output_format.py --dataset "$dataset" --prompt-profile qmrag_compact_chain_qa --latest --analysis-dir "$ANALYSIS_DIR" | tee -a "$MASTER_LOG" || true
+  python scripts/diagnose_output_format.py --dataset "$dataset" --prompt-profile ace_rag_compact_chain_qa --latest --analysis-dir "$ANALYSIS_DIR" | tee -a "$MASTER_LOG" || true
 done
 
 RUN_TS="$RUN_TS" LIMIT="$LIMIT" MODE="${MODE:-default}" LOG_DIR="$LOG_DIR" ANALYSIS_DIR="$ANALYSIS_DIR" FAILED_TSV="$FAILED_TSV" python - <<'PY'

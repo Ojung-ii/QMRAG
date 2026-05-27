@@ -166,12 +166,12 @@ def timing_ms(row: Mapping[str, Any]) -> tuple[float, float, float]:
 
 def method_name(prompt_profile: str) -> str:
     if prompt_profile == "common_qa":
-        return "qmrag_common"
-    if prompt_profile == "qmrag_bundle_qa":
-        return "qmrag_bundle"
-    if prompt_profile.startswith("qmrag_bundle_"):
-        return prompt_profile.replace("qmrag_", "qmrag_")
-    return f"qmrag_{prompt_profile}"
+        return "ace_rag_common"
+    if prompt_profile == "ace_rag_bundle_qa":
+        return "ace_rag_bundle"
+    if prompt_profile.startswith("ace_rag_bundle_"):
+        return prompt_profile.replace("ace_rag_", "ace_rag_")
+    return f"ace_rag_{prompt_profile}"
 
 
 def avg(values: Sequence[float]) -> float:
@@ -242,7 +242,7 @@ def evaluate_file(path: Path, analysis_dir: Path) -> dict[str, Any]:
         "source_predictions": str(path),
         "per_example": per,
     }
-    stem = f"qmrag_retrieval_metrics_{dataset}_{prompt}"
+    stem = f"ace_rag_retrieval_metrics_{dataset}_{prompt}"
     dump_json(summary, analysis_dir / f"{stem}.json")
     (analysis_dir / f"{stem}.md").write_text(markdown_summary(summary), encoding="utf-8")
     print(markdown_summary(summary))
@@ -290,7 +290,7 @@ def markdown_summary(summary: Mapping[str, Any]) -> str:
         fmt(summary.get("total_ms")),
     ]
     lines = [
-        "# QMRAG Retrieval Metrics",
+        "# ACE-RAG Retrieval Metrics",
         "",
         f"- prompt_profile: {summary.get('prompt_profile')}",
         f"- rendering_profile: {summary.get('rendering_profile')}",
@@ -302,7 +302,7 @@ def markdown_summary(summary: Mapping[str, Any]) -> str:
         "| " + " | ".join(["---"] * len(headers)) + " |",
         "| " + " | ".join(str(x) for x in row) + " |",
         "",
-        "## QMRAG Token Efficiency",
+        "## ACE-RAG Token Efficiency",
         "",
         "| avg_input_prompt_tokens | avg_completion_tokens | avg_total_llm_tokens | F1_per_1k_input_prompt_tokens | F1_per_1k_total_llm_tokens |",
         "| ---: | ---: | ---: | ---: | ---: |",
@@ -323,7 +323,7 @@ def markdown_summary(summary: Mapping[str, Any]) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Evaluate QMRAG retrieval/supporting-fact metrics from predictions.")
+    parser = argparse.ArgumentParser(description="Evaluate ACE-RAG retrieval/supporting-fact metrics from predictions.")
     parser.add_argument("--predictions", default=None)
     parser.add_argument("--dataset", default=None)
     parser.add_argument("--prompt-profile", default=None)
@@ -344,7 +344,7 @@ def main() -> None:
         paths = [find_latest_prediction(Path(args.output_root), args.dataset, args.prompt_profile)]
     summaries = [evaluate_file(path, analysis_dir) for path in paths]
     if len(summaries) > 1:
-        dump_json({"runs": summaries}, analysis_dir / "qmrag_retrieval_metrics_index.json")
+        dump_json({"runs": summaries}, analysis_dir / "ace_rag_retrieval_metrics_index.json")
 
 
 if __name__ == "__main__":

@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
-CONFIG="${SCRIPT_DIR}/qmrag_v2_bundle_full.yaml"
+CONFIG="${SCRIPT_DIR}/ace_rag_bundle_full.yaml"
 DATASETS=(hotpotqa 2wiki popqa musique)
 LIMIT="${LIMIT:-1000}"
 DRY_RUN=false
@@ -25,13 +25,13 @@ for dataset in "${DATASETS[@]}"; do
     --config "${CONFIG}"
     --datasets "${dataset}"
     --limit "${LIMIT}"
-    --prompt-profile qmrag_bundle_qa
+    --prompt-profile ace_rag_bundle_qa
     --rendering-profile structured_chain
     --retrieval-variant full_hetero
-    --seed-selection-variant top_relevance
+    --seed-selection-variant global_seed_search
     --enable-timing
   )
-  echo "[QMRAG v2 prompt ablation] ${cmd[*]}"
+  echo "[ACE-RAG prompt ablation] ${cmd[*]}"
   if [[ "${DRY_RUN}" == "false" ]]; then
     "${cmd[@]}"
   fi

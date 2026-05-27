@@ -1,7 +1,7 @@
-extends: qmrag_v2_common_full.yaml
+extends: ace_rag_common_full.yaml
 
 generation:
-  prompt_profile: qmrag_bundle_qa
+  prompt_profile: ace_rag_bundle_qa
   rendering_profile: structured_chain
   token_counting:
     enabled: true
@@ -16,4 +16,4 @@ sota_config:
   context_token_budget: null
   notes:
     - Same retrieval, ordering, rendering, and context as mainline.
-    - QMRAG-bundle prompt is an ablation/upper-bound for structured evidence utilization.
+    - ACE-RAG-bundle prompt is an ablation/upper-bound for structured evidence utilization.

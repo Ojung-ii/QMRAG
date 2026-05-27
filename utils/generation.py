@@ -45,7 +45,7 @@ ACE_RENDERER_VARIANTS = (
 )
 
 PROMPT_TEMPLATES = {
-    # Main fair-comparison prompt. Do not change for QMRAG/baseline comparisons.
+    # Main fair-comparison prompt. Do not change for ACE-RAG/baseline comparisons.
     "common_qa": """You are a QA assistant.
 Answer the question using only the provided Context.
 When possible, use a concise answer explicitly supported by the Context.
@@ -58,8 +58,8 @@ Question: {question}
 Context:
 {context}
 Answer:""",
-    # Existing QMRAG structured_chain native/ablation prompt. Kept for reproducibility.
-    "qmrag_bundle_qa": """You are a QA assistant for evidence-bundle based retrieval.
+    # Existing ACE-RAG structured_chain native/ablation prompt. Kept for reproducibility.
+    "ace_rag_bundle_qa": """You are a QA assistant for evidence-bundle based retrieval.
 Answer the question using only the provided Context.
 
 The Context may contain Evidence Chain, Multi-Anchor Evidence, and Supporting Evidence sections.
@@ -77,7 +77,7 @@ Context:
 {context}
 Answer:""",
     # Legacy ablation prompt; excluded from the new default runners.
-    "qmrag_bundle_light": """You are a QA assistant.
+    "ace_rag_bundle_light": """You are a QA assistant.
 Answer the question using only the provided Context.
 The Context may contain Evidence Chains and Multi-Anchor Evidence.
 For Evidence Chains, follow the Anchor → Bridge → answer evidence.
@@ -92,7 +92,7 @@ Context:
 {context}
 Answer:""",
     # Legacy ablation prompt; excluded from the new default runners.
-    "qmrag_bundle_tiny": """You are a QA assistant.
+    "ace_rag_bundle_tiny": """You are a QA assistant.
 Use only the Context.
 If an Evidence Chain is given, follow Anchor → Bridge → answer evidence.
 If Multi-Anchor Evidence is given, compare the listed anchors.
@@ -137,7 +137,7 @@ Question: {question}
 Context:
 {context}
 Answer:""",
-    "qmrag_bundle_short_qa": """---Role---
+    "ace_rag_bundle_short_qa": """---Role---
 
 You are an expert QA assistant specializing in short answer extraction from evidence-chain context.
 
@@ -178,7 +178,7 @@ Question: {question}
 Context:
 {context}
 Answer:""",
-    "qmrag_compact_chain_qa": """You are a QA assistant for compact evidence-chain context.
+    "ace_rag_compact_chain_qa": """You are a QA assistant for compact evidence-chain context.
 Answer the question using only the provided Context.
 
 Each Evidence Chain represents:
@@ -201,7 +201,7 @@ Question: {question}
 Context:
 {context}
 Answer:""",
-    "qmrag_compact_chain_light": """You are a QA assistant.
+    "ace_rag_compact_chain_light": """You are a QA assistant.
 Use only the Context.
 
 For an Evidence Chain, use the first sentence as the link from the question anchor to the bridge entity, and the next sentence as the answer evidence about that bridge entity.
@@ -214,7 +214,7 @@ Question: {question}
 Context:
 {context}
 Answer:""",
-    "qmrag_compact_chain_short_qa": """---Role---
+    "ace_rag_compact_chain_short_qa": """---Role---
 
 You are an expert QA assistant specializing in short answer extraction from compact evidence chains.
 
@@ -249,9 +249,9 @@ Answer:""",
 
 PROMPT_TEMPLATES.update({
     # ACE-RAG native prompt ablation variants. p0 is intentionally an exact
-    # alias of the current QMRAG/ACE-RAG short-style native prompt.
-    "acerag_native_p0_current": PROMPT_TEMPLATES["qmrag_bundle_short_qa"],
-    "acerag_native_p1_supporting_fallback": """---Role---
+    # alias of the current short-style native prompt.
+    "ace_rag_native_p0_current": PROMPT_TEMPLATES["ace_rag_bundle_short_qa"],
+    "ace_rag_native_p1_supporting_fallback": """---Role---
 
 You are an expert QA assistant specializing in short answer extraction from evidence-chain context.
 
@@ -295,7 +295,7 @@ Question: {question}
 Context:
 {context}
 Answer:""",
-    "acerag_native_p2_relaxed_chain": """---Role---
+    "ace_rag_native_p2_relaxed_chain": """---Role---
 
 You are an expert QA assistant specializing in short answer extraction from compact retrieved evidence.
 
@@ -344,7 +344,7 @@ Question: {question}
 Context:
 {context}
 Answer:""",
-    "acerag_native_p3_minimal_extraction": """---Role---
+    "ace_rag_native_p3_minimal_extraction": """---Role---
 
 You are an expert reading comprehension assistant.
 
@@ -370,7 +370,7 @@ Question: {question}
 Context:
 {context}
 Answer:""",
-    "acerag_native_p4_fewshot_extraction": """---Role---
+    "ace_rag_native_p4_fewshot_extraction": """---Role---
 
 You are an expert reading comprehension assistant.
 
@@ -406,7 +406,7 @@ Question: {question}
 Context:
 {context}
 Answer:""",
-    "acerag_native_p5_hippo_cot_style": """As an advanced reading comprehension assistant, your task is to answer the question using only the provided evidence context.
+    "ace_rag_native_p5_hippo_cot_style": """As an advanced reading comprehension assistant, your task is to answer the question using only the provided evidence context.
 
 You may reason internally. If you write reasoning, put the final concise answer after "Answer:".
 The final answer must be a short answer span.
@@ -432,7 +432,7 @@ Question: {question}
 Context:
 {context}
 Thought:""",
-    "acerag_native_p6_aggressive_span": """---Role---
+    "ace_rag_native_p6_aggressive_span": """---Role---
 
 You are an expert short-answer extractor.
 
@@ -458,7 +458,7 @@ Question: {question}
 Context:
 {context}
 Answer:""",
-    "acerag_native_p7_anchor_priority": """---Role---
+    "ace_rag_native_p7_anchor_priority": """---Role---
 
 You are an expert QA assistant for structured evidence contexts.
 
@@ -485,7 +485,7 @@ Question: {question}
 Context:
 {context}
 Answer:""",
-    "acerag_native_p8_r0_section_aware": """---Role---
+    "ace_rag_native_p8_r0_section_aware": """---Role---
 
 You are an expert reading-comprehension assistant for ACE-RAG structured evidence.
 
@@ -514,7 +514,7 @@ Question: {question}
 Context:
 {context}
 Answer:""",
-    "acerag_native_p9_hippo_style_answer_only": """---Role---
+    "ace_rag_native_p9_hippo_style_answer_only": """---Role---
 
 You are an advanced reading comprehension assistant.
 
@@ -553,16 +553,16 @@ Answer:""",
 })
 
 ACE_NATIVE_PROMPT_VARIANT_TO_PROFILE = {
-    "p0_current": "acerag_native_p0_current",
-    "p1_supporting_fallback": "acerag_native_p1_supporting_fallback",
-    "p2_relaxed_chain": "acerag_native_p2_relaxed_chain",
-    "p3_minimal_extraction": "acerag_native_p3_minimal_extraction",
-    "p4_fewshot_extraction": "acerag_native_p4_fewshot_extraction",
-    "p5_hippo_cot_style": "acerag_native_p5_hippo_cot_style",
-    "p6_aggressive_span": "acerag_native_p6_aggressive_span",
-    "p7_anchor_priority": "acerag_native_p7_anchor_priority",
-    "p8_r0_section_aware": "acerag_native_p8_r0_section_aware",
-    "p9_hippo_style_answer_only": "acerag_native_p9_hippo_style_answer_only",
+    "p0_current": "ace_rag_native_p0_current",
+    "p1_supporting_fallback": "ace_rag_native_p1_supporting_fallback",
+    "p2_relaxed_chain": "ace_rag_native_p2_relaxed_chain",
+    "p3_minimal_extraction": "ace_rag_native_p3_minimal_extraction",
+    "p4_fewshot_extraction": "ace_rag_native_p4_fewshot_extraction",
+    "p5_hippo_cot_style": "ace_rag_native_p5_hippo_cot_style",
+    "p6_aggressive_span": "ace_rag_native_p6_aggressive_span",
+    "p7_anchor_priority": "ace_rag_native_p7_anchor_priority",
+    "p8_r0_section_aware": "ace_rag_native_p8_r0_section_aware",
+    "p9_hippo_style_answer_only": "ace_rag_native_p9_hippo_style_answer_only",
 }
 ACE_NATIVE_PROMPT_VARIANTS = tuple(ACE_NATIVE_PROMPT_VARIANT_TO_PROFILE)
 ACE_NATIVE_PROMPT_PROFILE_TO_VARIANT = {v: k for k, v in ACE_NATIVE_PROMPT_VARIANT_TO_PROFILE.items()}

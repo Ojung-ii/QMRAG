@@ -169,7 +169,7 @@ def find_latest_prediction_any(output_root: Path, dataset: str | None, prompt_pr
             continue
         ablation=str(first.get("ablation_variant") or "")
         residual=str((first.get("retrieval_diagnostics",{}) or {}).get("residual_selection_variant") or first.get("residual_selection_variant") or "")
-        pref=2 if ablation in {"","core_qmrag_mainline"} and residual in {"","residual_lexical"} else 1 if ablation in {"","core_qmrag_mainline"} else 0
+        pref=2 if ablation in {"","core_ace_rag_mainline"} and residual in {"","residual_lexical"} else 1 if ablation in {"","core_ace_rag_mainline"} else 0
         candidates.append((pref,path.stat().st_mtime,str(path),path))
     if not candidates:
         raise SystemExit(f"No matching predictions.jsonl found for dataset={dataset!r} prompt_profile={prompt_profile!r}")

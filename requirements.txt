@@ -1,5 +1,5 @@
-# QMRAG runtime dependencies.
-# Create the conda env with scripts/create_qmrag_env.sh so PyTorch 2.2.0 + CUDA 12.1 is installed by conda.
+# ACE-RAG runtime dependencies.
+# Create the conda env with scripts/create_ace_rag_env.sh so PyTorch 2.2.0 + CUDA 12.1 is installed by conda.
 # NV-Embed-v2 compatibility pins are intentionally strict.
 numpy==1.26.4
 pyyaml==6.0.2

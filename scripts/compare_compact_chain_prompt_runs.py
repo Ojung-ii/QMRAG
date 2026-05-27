@@ -18,7 +18,7 @@ from utils.generation import is_insufficient_prediction
 from utils.io_utils import dump_json, ensure_dir, read_jsonl
 
 
-TARGET_PROMPTS = {"common_qa", "strict_short_qa", "qmrag_compact_chain_qa", "qmrag_compact_chain_light"}
+TARGET_PROMPTS = {"common_qa", "strict_short_qa", "ace_rag_compact_chain_qa", "ace_rag_compact_chain_light"}
 TARGET_COMPACTIONS = {
     "none",
     "chain_schema_k2",
@@ -50,9 +50,9 @@ def first_jsonl_row(path: Path) -> dict[str,Any] | None:
 def source_preference(first: Mapping[str,Any]) -> int:
     ablation=str(first.get("ablation_variant") or "")
     residual=str((first.get("retrieval_diagnostics",{}) or {}).get("residual_selection_variant") or first.get("residual_selection_variant") or "")
-    if ablation in {"", "core_qmrag_mainline"} and residual in {"", "residual_lexical"}:
+    if ablation in {"", "core_ace_rag_mainline"} and residual in {"", "residual_lexical"}:
         return 2
-    if ablation in {"", "core_qmrag_mainline"}:
+    if ablation in {"", "core_ace_rag_mainline"}:
         return 1
     return 0
 
@@ -281,7 +281,7 @@ def main() -> None:
     for dataset in datasets:
         root=Path(args.output_root)
         full_common=find_latest_full(root,dataset,"common_qa")
-        full_bundle=find_latest_full(root,dataset,"qmrag_bundle_qa")
+        full_bundle=find_latest_full(root,dataset,"ace_rag_bundle_qa")
         paths=find_latest_runs(root,dataset)
         summary=build_summary(dataset,paths,full_common,full_bundle)
         all_summaries.append(summary)

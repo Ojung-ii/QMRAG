@@ -34,7 +34,7 @@ DISPLAY_NAMES = {
     "popqa": "popqa",
 }
 
-MAINLINE_VARIANTS = {"", "ace-rag", "acerag", "ace_rag", "core_qmrag_mainline", "mainline", "qmrag"}
+MAINLINE_VARIANTS = {"", "ace-rag", "ace_rag", "ace_rag", "core_ace_rag_mainline", "mainline", "ace_rag"}
 
 ABLATION_VARIANT_PREFIXES = ("core_no_",)
 ABLATION_VARIANTS = {"core_bridge_fullquery", "core_no_anchor_ordering", "core_no_multi_anchor"}

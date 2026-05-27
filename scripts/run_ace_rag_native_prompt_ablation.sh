@@ -2,7 +2,7 @@
 set -euo pipefail
 
 STAGE="${1:-all}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-outputs/acerag_native_prompt_ablation}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-outputs/ace_rag_native_prompt_ablation}"
 RUN_ID="${RUN_ID:-}"
 N="${N:-100}"
 DATASETS="${DATASETS:-hotpotqa 2wikimultihopqa}"
@@ -90,7 +90,7 @@ run_smoke() {
     run_replay "stage0_smoke" "hotpotqa" "$variant" "3" "5" "top3_chain_dedup" \
       "$RUN_ROOT/stage0_smoke/hotpotqa/$variant"
   done
-  python scripts/compare_acerag_native_prompt_ablation.py --root "$RUN_ROOT"
+  python scripts/compare_ace_rag_native_prompt_ablation.py --root "$RUN_ROOT"
 }
 
 run_stage1() {
@@ -101,13 +101,13 @@ run_stage1() {
         "$RUN_ROOT/stage1_prompt_top3/$dataset/$variant"
     done
   done
-  python scripts/compare_acerag_native_prompt_ablation.py --root "$RUN_ROOT"
+  python scripts/compare_ace_rag_native_prompt_ablation.py --root "$RUN_ROOT"
 }
 
 run_stage2() {
   local best="${BEST_PROMPT_VARIANT:-}"
   if [[ -z "$best" ]]; then
-    best="$(python scripts/compare_acerag_native_prompt_ablation.py --root "$RUN_ROOT" --print-best)"
+    best="$(python scripts/compare_ace_rag_native_prompt_ablation.py --root "$RUN_ROOT" --print-best)"
   fi
   echo "BEST_PROMPT_VARIANT=$best"
   for raw_dataset in $DATASETS; do
@@ -117,7 +117,7 @@ run_stage2() {
         "$RUN_ROOT/stage2_context_scaling/$dataset/${best}_top${top_k}"
     done
   done
-  python scripts/compare_acerag_native_prompt_ablation.py --root "$RUN_ROOT"
+  python scripts/compare_ace_rag_native_prompt_ablation.py --root "$RUN_ROOT"
 }
 
 top_values_for_variant() {
@@ -172,7 +172,7 @@ run_custom() {
       done
     done
   done
-  python scripts/compare_acerag_native_prompt_ablation.py --root "$RUN_ROOT"
+  python scripts/compare_ace_rag_native_prompt_ablation.py --root "$RUN_ROOT"
 }
 
 run_final_core() {
@@ -197,7 +197,7 @@ run_final_core() {
   done
   ln -sfn "$RUN_ROOT/$stage_dir" "$OUTPUT_ROOT/latest_core_n1000"
   printf "%s\n" "$RUN_ROOT/$stage_dir" > "$OUTPUT_ROOT/latest_core_n1000.txt"
-  python scripts/compare_acerag_native_prompt_ablation.py --root "$RUN_ROOT"
+  python scripts/compare_ace_rag_native_prompt_ablation.py --root "$RUN_ROOT"
 }
 
 run_appendix_4ds() {
@@ -207,7 +207,7 @@ run_appendix_4ds() {
     run_replay "$stage_dir" "$dataset" "p2_relaxed_chain" "8" "$N" "chain_dedup" \
       "$RUN_ROOT/$stage_dir/$dataset/p2_relaxed_chain_top8"
   done
-  python scripts/compare_acerag_native_prompt_ablation.py --root "$RUN_ROOT"
+  python scripts/compare_ace_rag_native_prompt_ablation.py --root "$RUN_ROOT"
 }
 
 case "$STAGE" in

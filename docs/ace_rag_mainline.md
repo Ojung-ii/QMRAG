@@ -1,11 +1,11 @@
-# QMRAG Mainline Record
+# ACE-RAG Mainline Record
 
-This note records the current QMRAG mainline used for paper-facing runs.
+This note records the current ACE-RAG mainline used for paper-facing runs.
 
 ## Mainline Configuration
 
 - Retrieval variant: `full_hetero`
-- Seed selection variant: `top_relevance`
+- Seed selection variant: `global_seed_search`
 - Residual bridge selection: `residual_lexical`
 - Bridge ordering: `anchor_chain_aware`
 - Multi-anchor bundles: enabled
@@ -19,7 +19,7 @@ The reproducible config entry is:
 extends: ../default.yaml
 
 run:
-  ablation_variant: core_qmrag_mainline
+  ablation_variant: core_ace_rag_mainline
   enable_timing: true
 
 generation:
@@ -29,7 +29,7 @@ generation:
 
 retrieval:
   retrieval_variant: full_hetero
-  seed_selection_variant: top_relevance
+  seed_selection_variant: global_seed_search
   residual_selection: residual_lexical
   candidate_cap:
     enabled: false
@@ -136,10 +136,10 @@ Answer:
 Run the current mainline:
 
 ```bash
-bash scripts/run_dataset.sh hotpotqa --config config/ablation/core_qmrag_mainline.yaml
-bash scripts/run_dataset.sh 2wiki --config config/ablation/core_qmrag_mainline.yaml
-bash scripts/run_dataset.sh popqa --config config/ablation/core_qmrag_mainline.yaml
-bash scripts/run_dataset.sh musique --config config/ablation/core_qmrag_mainline.yaml
+bash scripts/run_dataset.sh hotpotqa --config config/ablation/core_ace_rag_mainline.yaml
+bash scripts/run_dataset.sh 2wiki --config config/ablation/core_ace_rag_mainline.yaml
+bash scripts/run_dataset.sh popqa --config config/ablation/core_ace_rag_mainline.yaml
+bash scripts/run_dataset.sh musique --config config/ablation/core_ace_rag_mainline.yaml
 ```
 
 Run the compact-chain prompt ablation from existing full-context outputs:
@@ -149,7 +149,7 @@ python scripts/replay_generation.py \
   --dataset hotpotqa \
   --source-prompt common_qa \
   --source-rendering-profile structured_chain \
-  --target-prompt qmrag_compact_chain_short_qa \
+  --target-prompt ace_rag_compact_chain_short_qa \
   --latest \
   --compaction-profile top3_chain_dedup
 ```

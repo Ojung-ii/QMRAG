@@ -94,30 +94,30 @@ mode, limit, slots, jobs_path, profile_status_path, include_native = sys.argv[1]
 datasets = ["hotpotqa", "2wiki", "popqa", "musique"]
 recommended_groups = [
     ("none", "strict_short_qa", "full_strict_short"),
-    ("none", "qmrag_bundle_short_qa", "full_bundle_short"),
+    ("none", "ace_rag_bundle_short_qa", "full_bundle_short"),
     ("metadata_only_compact", "common_qa", "common_compact"),
     ("chain_dedup", "common_qa", "common_compact"),
     ("top3_chain_dedup", "common_qa", "common_compact"),
 ]
 native_compact_groups = [
-    ("chain_dedup", "qmrag_bundle_short_qa", "native_compact"),
-    ("top3_chain_dedup", "qmrag_compact_chain_short_qa", "native_compact"),
+    ("chain_dedup", "ace_rag_bundle_short_qa", "native_compact"),
+    ("top3_chain_dedup", "ace_rag_compact_chain_short_qa", "native_compact"),
 ]
 all_groups = [
     ("none", "strict_short_qa", "full_strict_short"),
-    ("none", "qmrag_bundle_short_qa", "full_bundle_short"),
+    ("none", "ace_rag_bundle_short_qa", "full_bundle_short"),
     ("metadata_only_compact", "common_qa", "common_compact"),
     ("chain_dedup", "common_qa", "common_compact"),
     ("top3_chain_dedup", "common_qa", "common_compact"),
     ("chain_schema_k3", "common_qa", "common_compact"),
     ("chain_schema_plus1_k3", "common_qa", "common_compact"),
     ("top3_schema_dedup", "common_qa", "common_compact"),
-    ("metadata_only_compact", "qmrag_bundle_short_qa", "native_compact"),
-    ("chain_dedup", "qmrag_bundle_short_qa", "native_compact"),
-    ("top3_chain_dedup", "qmrag_compact_chain_short_qa", "native_compact"),
-    ("chain_schema_k3", "qmrag_compact_chain_short_qa", "native_compact"),
-    ("chain_schema_plus1_k3", "qmrag_compact_chain_short_qa", "native_compact"),
-    ("top3_schema_dedup", "qmrag_compact_chain_short_qa", "native_compact"),
+    ("metadata_only_compact", "ace_rag_bundle_short_qa", "native_compact"),
+    ("chain_dedup", "ace_rag_bundle_short_qa", "native_compact"),
+    ("top3_chain_dedup", "ace_rag_compact_chain_short_qa", "native_compact"),
+    ("chain_schema_k3", "ace_rag_compact_chain_short_qa", "native_compact"),
+    ("chain_schema_plus1_k3", "ace_rag_compact_chain_short_qa", "native_compact"),
+    ("top3_schema_dedup", "ace_rag_compact_chain_short_qa", "native_compact"),
 ]
 profile_aliases = {
     "metadata_only_compact": "metadata_only_compact",

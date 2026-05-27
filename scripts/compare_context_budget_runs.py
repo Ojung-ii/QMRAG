@@ -210,7 +210,7 @@ def markdown(summary: Mapping[str, Any]) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Compare full-context and truncated-context QMRAG runs.")
+    parser = argparse.ArgumentParser(description="Compare full-context and truncated-context ACE-RAG runs.")
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--prompt-profile", default="common_qa")
     parser.add_argument("--left-full", default="latest")

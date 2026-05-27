@@ -1,14 +1,14 @@
-# QMRAG
+# ACE-RAG
 
-**QMRAG** = Query-conditioned Medoid Retrieval Augmented Generation.
+**ACE-RAG** = Answerable Chain Evidence Retrieval for GraphRAG.
 
-This repository implements a lightweight GraphRAG-style research scaffold inspired by PAMAE's two-phase idea:
+This repository implements ACE-RAG, a compact evidence-chain retrieval framework for GraphRAG:
 
-1. query-conditioned global candidate retrieval,
-2. stochastic medoid-like evidence portal seeding,
-3. local evidence-bundle refinement over a lightweight Entity-Proposition-Chunk graph.
+1. Global Seed Search over anchor, chunk, and sentence/proposition views,
+2. Local Refinement through mention-edge expansion and residual cue selection,
+3. compact evidence-chain rendering with anchor bundling.
 
-The code intentionally avoids expensive community hierarchy construction and recursive summarization during indexing. The indexing unit is cheap: title/entity hubs, sentence-level propositions, and packed source chunks.
+The code intentionally avoids broad graph expansion during retrieval. The index stays lightweight: title/entity anchors, sentence-level propositions, and packed source chunks.
 
 ## Repository layout
 
@@ -34,7 +34,7 @@ utils/
   io_utils.py
   text.py
 scripts/
-  create_qmrag_env.sh
+  create_ace_rag_env.sh
   check_env.py
   check_nvembed_env.py
   check_vllm.py
@@ -86,18 +86,18 @@ python scripts/prepare_data_layout.py --src /mnt/data --dst data
 
 The repository zip keeps only `.gitkeep` files under `data/`; actual datasets are intentionally not committed by default.
 
-## QMRAG conda environment
+## ACE-RAG conda environment
 
-vLLM is assumed to be running in a separate environment. QMRAG only needs the client/runtime environment for retrieval, local embedding, and API calls.
+vLLM is assumed to be running in a separate environment. ACE-RAG only needs the client/runtime environment for retrieval, local embedding, and API calls.
 
 Recommended setup:
 
 ```bash
-bash scripts/create_qmrag_env.sh
-conda activate QMRAG
+bash scripts/create_ace_rag_env.sh
+conda activate ACE-RAG
 ```
 
-The script creates a Python 3.10 environment, installs PyTorch 2.2.0 with CUDA 12.1 through conda, installs the pinned QMRAG dependencies, and removes `transformer-engine` if it is present.
+The script creates a Python 3.10 environment, installs PyTorch 2.2.0 with CUDA 12.1 through conda, installs the pinned ACE-RAG dependencies, and removes `transformer-engine` if it is present.
 
 The NV-Embed-v2 compatibility pins are reflected in `environment.yml` and `requirements.txt`:
 
@@ -117,7 +117,7 @@ bash scripts/install_flash_attn_optional.sh
 or during environment creation:
 
 ```bash
-INSTALL_FLASH_ATTN=1 bash scripts/create_qmrag_env.sh
+INSTALL_FLASH_ATTN=1 bash scripts/create_ace_rag_env.sh
 ```
 
 ## Environment variables
@@ -243,12 +243,12 @@ The CLI also prints a markdown table with EM, F1, answer containment, support-ti
 Recommended workflow:
 
 ```bash
-unzip QMRAG.zip
-cd QMRAG
+unzip ACE-RAG.zip
+cd ACE-RAG
 
 git init
 git add .
-git commit -m "Initial QMRAG scaffold"
+git commit -m "Initial ACE-RAG scaffold"
 git branch -M main
 git remote add origin <YOUR_GITHUB_REPO_URL>
 git push -u origin main
@@ -258,9 +258,9 @@ On the server:
 
 ```bash
 git clone <YOUR_GITHUB_REPO_URL>
-cd QMRAG
-bash scripts/create_qmrag_env.sh
-conda activate QMRAG
+cd ACE-RAG
+bash scripts/create_ace_rag_env.sh
+conda activate ACE-RAG
 python scripts/prepare_data_layout.py --src /path/to/data/files --dst data
 python scripts/check_vllm.py
 python scripts/check_nvembed_env.py --load --encode

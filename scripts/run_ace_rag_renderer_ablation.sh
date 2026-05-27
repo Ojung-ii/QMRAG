@@ -2,7 +2,7 @@
 set -euo pipefail
 
 STAGE="${1:-smoke}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-outputs/acerag_renderer_ablation}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-outputs/ace_rag_renderer_ablation}"
 RUN_ID="${RUN_ID:-}"
 N="${N:-}"
 DATASETS="${DATASETS:-hotpotqa 2wikimultihopqa}"
@@ -173,7 +173,7 @@ run_matrix() {
       done
     done
   fi
-  python scripts/compare_acerag_renderer_ablation.py --root "$RUN_ROOT"
+  python scripts/compare_ace_rag_renderer_ablation.py --root "$RUN_ROOT"
 }
 
 case "$STAGE" in

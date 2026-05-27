@@ -20,12 +20,12 @@ for dataset in hotpotqa 2wiki; do
   if python scripts/compare_prompt_runs.py \
     --dataset "$dataset" \
     --left-prompt common_qa \
-    --right-prompt qmrag_bundle_qa \
+    --right-prompt ace_rag_bundle_qa \
     --latest \
     --analysis-dir "$ANALYSIS_DIR"; then
     true
   else
-    echo "skip compare for $dataset: missing common_qa or qmrag_bundle_qa latest run" >&2
+    echo "skip compare for $dataset: missing common_qa or ace_rag_bundle_qa latest run" >&2
   fi
 done
 

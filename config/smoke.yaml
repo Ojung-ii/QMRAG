@@ -1,5 +1,5 @@
 project:
-  name: QMRAG-smoke
+  name: ACE-RAG-smoke
 
 run:
   output_root: outputs
@@ -21,7 +21,7 @@ indexing:
 
 retrieval:
   retrieval_variant: full_hetero
-  seed_selection_variant: medoid_current
+  seed_selection_variant: global_seed_search
   random_seed: 13
   search_units: [proposition, chunk, entity]
   candidate_top_k: 40

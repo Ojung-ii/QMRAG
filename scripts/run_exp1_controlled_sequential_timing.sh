@@ -97,9 +97,9 @@ for dataset in "${DATASETS[@]}"; do
   job_id=$((job_id + 1))
   printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" "$job_id" "$CUDA_VISIBLE_DEVICES" "$dataset" "compact_common" "top3_chain_dedup" "common_qa" "$LIMIT" >> "$JOBS_TSV"
   job_id=$((job_id + 1))
-  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" "$job_id" "$CUDA_VISIBLE_DEVICES" "$dataset" "compact_native_bundle_short" "top3_chain_dedup" "qmrag_bundle_short_qa" "$LIMIT" >> "$JOBS_TSV"
+  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" "$job_id" "$CUDA_VISIBLE_DEVICES" "$dataset" "compact_native_bundle_short" "top3_chain_dedup" "ace_rag_bundle_short_qa" "$LIMIT" >> "$JOBS_TSV"
   job_id=$((job_id + 1))
-  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" "$job_id" "$CUDA_VISIBLE_DEVICES" "$dataset" "compact_native_compact_short" "top3_chain_dedup" "qmrag_compact_chain_short_qa" "$LIMIT" >> "$JOBS_TSV"
+  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" "$job_id" "$CUDA_VISIBLE_DEVICES" "$dataset" "compact_native_compact_short" "top3_chain_dedup" "ace_rag_compact_chain_short_qa" "$LIMIT" >> "$JOBS_TSV"
   job_id=$((job_id + 1))
   if [[ "$INCLUDE_STRICT_SHORT" == "1" ]]; then
     printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" "$job_id" "$CUDA_VISIBLE_DEVICES" "$dataset" "compact_strict_short" "top3_chain_dedup" "strict_short_qa" "$LIMIT" >> "$JOBS_TSV"

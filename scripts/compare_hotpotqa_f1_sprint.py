@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.audit_acerag_context_rendering import norm_contains
+from scripts.audit_ace_rag_context_rendering import norm_contains
 from utils.eval_metrics import answer_f1, exact_match, is_insufficient_prediction
 from utils.io_utils import dump_json, read_jsonl
 

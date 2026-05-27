@@ -433,7 +433,7 @@ def analyze_predictions(path: Path, analysis_dir: Path, sample: int) -> dict[str
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Categorize QMRAG prediction failures.")
+    parser = argparse.ArgumentParser(description="Categorize ACE-RAG prediction failures.")
     parser.add_argument("--predictions", default=None)
     parser.add_argument("--dataset", default=None)
     parser.add_argument("--prompt-profile", default=None)

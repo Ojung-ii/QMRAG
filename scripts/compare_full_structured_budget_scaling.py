@@ -107,6 +107,7 @@ def row_from_eval(eval_data: Mapping[str, Any], cols: list[str]) -> dict[str, An
     generation_ms = metric(eval_data, "generation_latency_ms")
     retrieval_ms = metric(eval_data, "retrieval_latency_ms")
     actual_ctx = metric(eval_data, "avg_actual_context_tokens", "avg_context_tokens", "avg_rendered_context_tokens")
+    n = int(metric(eval_data, "n", default=0.0))
     return {
         "job_id": int(job_id),
         "gpu": gpu,
@@ -118,7 +119,8 @@ def row_from_eval(eval_data: Mapping[str, Any], cols: list[str]) -> dict[str, An
         "compaction_profile": profile,
         "limit": int(limit),
         "path": eval_data.get("_predictions_path"),
-        "n": int(metric(eval_data, "n", default=0.0)),
+        "n": n,
+        "run_scope": "full_run_n1000" if n == 1000 else "smoke_test",
         "F1": f1,
         "EM": metric(eval_data, "EM", "em"),
         "AnsPred": metric(eval_data, "answer_in_prediction", "answer_contains"),
@@ -252,9 +254,9 @@ def write_markdown(path: Path, run_dir: Path, rows: list[dict[str, Any]], failed
         "",
     ]
     lines += md_table(
-        ["dataset","budget_point","setting","F1","EM","AnsPred","AnsCtx","Insuff","actual_CtxTok","InputTok","TotalTok","bundles","chains","support","sources","sentences","saturated","F1/1kInput","gen_ms","retr_ms","eff_ms","TokenDown","dF1_top3","dF1_full","EBHash","CtxHash","budget_valid"],
+        ["dataset","budget_point","setting","run_scope","F1","EM","AnsPred","AnsCtx","Insuff","actual_CtxTok","InputTok","TotalTok","bundles","chains","support","sources","sentences","saturated","F1/1kInput","gen_ms","retr_ms","eff_ms","TokenDown","dF1_top3","dF1_full","EBHash","CtxHash","budget_valid"],
         rows,
-        ["dataset","budget_point","setting","F1","EM","AnsPred","AnsCtx","Insuff","actual_CtxTok","InputTok","TotalTok","rendered_bundle_count","rendered_chain_count","rendered_support_count","rendered_source_count","rendered_sentence_count","budget_saturated_rate","F1_per_1k_input","generation_ms","source_retrieval_ms","effective_total_ms","TokenDown_vs_full","F1_delta_vs_top3","F1_delta_vs_full","evidence_bundles_hash_match_rate","rendered_context_hash_match_rate","budget_valid"],
+        ["dataset","budget_point","setting","run_scope","F1","EM","AnsPred","AnsCtx","Insuff","actual_CtxTok","InputTok","TotalTok","rendered_bundle_count","rendered_chain_count","rendered_support_count","rendered_source_count","rendered_sentence_count","budget_saturated_rate","F1_per_1k_input","generation_ms","source_retrieval_ms","effective_total_ms","TokenDown_vs_full","F1_delta_vs_top3","F1_delta_vs_full","evidence_bundles_hash_match_rate","rendered_context_hash_match_rate","budget_valid"],
         {"actual_CtxTok":1,"InputTok":1,"TotalTok":1,"generation_ms":1,"source_retrieval_ms":1,"effective_total_ms":1},
     )
     lines += ["", "## Section 2. Context Growth Validation", ""]
@@ -281,7 +283,7 @@ def write_markdown(path: Path, run_dir: Path, rows: list[dict[str, Any]], failed
     if any(bool(data.get("budget_context_growth_valid")) and bool(interp.get(dataset, {}).get("budget_scaling_positive")) for dataset, data in growth.items()):
         lines += [
             "",
-            "Paper draft: As the rendering budget increases, BRACE-RAG recovers additional answer accuracy, showing that the same retrieved evidence chains can trade token efficiency for higher answer quality.",
+            "Paper draft: As the rendering budget increases, ACE-RAG recovers additional answer accuracy, showing that the same retrieved evidence chains can trade token efficiency for higher answer quality.",
         ]
     else:
         lines += [

@@ -78,9 +78,9 @@ def first_jsonl_row(path: Path) -> dict[str, Any] | None:
 def source_preference(first: Mapping[str, Any]) -> int:
     ablation=str(first.get("ablation_variant") or "")
     residual=str((first.get("retrieval_diagnostics",{}) or {}).get("residual_selection_variant") or first.get("residual_selection_variant") or "")
-    if ablation in {"", "core_qmrag_mainline"} and residual in {"", "residual_lexical"}:
+    if ablation in {"", "core_ace_rag_mainline"} and residual in {"", "residual_lexical"}:
         return 2
-    if ablation in {"", "core_qmrag_mainline"}:
+    if ablation in {"", "core_ace_rag_mainline"}:
         return 1
     return 0
 
@@ -124,11 +124,11 @@ def find_latest_prediction_with_rendering(
 def prompt_experiment_type(source_prompt: str, target_prompt: str, rendering_changed: bool, context_truncation: bool = False, context_compaction: bool = False) -> str:
     if target_prompt == "strict_short_qa" and not context_compaction and not context_truncation and not rendering_changed:
         return "format_ablation"
-    if target_prompt in {"qmrag_compact_chain_qa", "qmrag_compact_chain_light", "qmrag_compact_chain_short_qa"}:
+    if target_prompt in {"ace_rag_compact_chain_qa", "ace_rag_compact_chain_light", "ace_rag_compact_chain_short_qa"}:
         return "compact_prompt_ablation"
-    if target_prompt.startswith("acerag_native_"):
+    if target_prompt.startswith("ace_rag_native_"):
         return "ace_native_prompt_ablation"
-    if target_prompt in {"qmrag_bundle_qa", "qmrag_bundle_light", "qmrag_bundle_tiny", "qmrag_bundle_short_qa"}:
+    if target_prompt in {"ace_rag_bundle_qa", "ace_rag_bundle_light", "ace_rag_bundle_tiny", "ace_rag_bundle_short_qa"}:
         return "ablation"
     if context_compaction:
         return "context_compaction_replay"
@@ -557,7 +557,7 @@ def main() -> None:
     args = parser.parse_args()
 
     ace_variant = args.ace_native_prompt_variant
-    target_prompt = str(args.prompt_profile or "qmrag_bundle_qa")
+    target_prompt = str(args.prompt_profile or "ace_rag_bundle_qa")
     if ace_variant:
         variant_prompt = resolve_ace_native_prompt_profile(ace_variant)
         if args.prompt_profile and args.prompt_profile != variant_prompt:

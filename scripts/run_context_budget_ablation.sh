@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ "$#" -lt 2 ]]; then
-  echo "Usage: bash scripts/run_context_budget_ablation.sh <hotpotqa|2wiki|popqa|musique|all> <common_qa|qmrag_bundle_qa> [limit] [--limit N] [--include-raw-score]" >&2
+  echo "Usage: bash scripts/run_context_budget_ablation.sh <hotpotqa|2wiki|popqa|musique|all> <common_qa|ace_rag_bundle_qa> [limit] [--limit N] [--include-raw-score]" >&2
   exit 2
 fi
 
@@ -201,7 +201,7 @@ lines.extend([
     "",
     "- Retrieval and ranking are not rerun; each replay reuses stored evidence_bundles.",
     "- `token_reduction_rate` is computed from full-context input prompt tokens.",
-    "- `ordering_source=current` preserves QMRAG bundle ordering before top-k/budget selection.",
+    "- `ordering_source=current` preserves ACE-RAG bundle ordering before top-k/budget selection.",
 ])
 (analysis_dir / "context_budget_ablation_summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 print(analysis_dir / "context_budget_ablation_summary.md")

@@ -217,7 +217,7 @@ def markdown_compare(summary: Mapping[str, Any], rows: Sequence[Mapping[str, Any
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Compare QMRAG rendering-profile replay runs by id.")
+    parser = argparse.ArgumentParser(description="Compare ACE-RAG rendering-profile replay runs by id.")
     parser.add_argument("--left", default=None)
     parser.add_argument("--right", default=None)
     parser.add_argument("--dataset", default=None)

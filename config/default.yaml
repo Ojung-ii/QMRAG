@@ -1,5 +1,5 @@
 project:
-  name: QMRAG
+  name: ACE-RAG
 
 run:
   output_root: outputs
@@ -12,7 +12,7 @@ logging:
   rendered_context_preview_chars: 2000
 
 indexing:
-  # QMRAG keeps indexing cheap: title entity hub + sentence propositions + packed source chunks.
+  # ACE-RAG keeps indexing cheap: title entity hub + sentence propositions + packed source chunks.
   # Chunk is a source/provenance span. Retrieval primarily uses propositions.
   max_chunk_tokens: 240
   min_prop_tokens: 2
@@ -40,7 +40,7 @@ indexing:
 
 retrieval:
   retrieval_variant: full_hetero
-  seed_selection_variant: medoid_current
+  seed_selection_variant: global_seed_search
   random_seed: 13
   search_units: [proposition, chunk, entity]
   candidate_top_k: 80

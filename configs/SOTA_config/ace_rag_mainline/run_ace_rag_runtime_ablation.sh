@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
-CONFIG="${SCRIPT_DIR}/qmrag_v2_runtime_cap60.yaml"
+CONFIG="${SCRIPT_DIR}/ace_rag_runtime_cap60.yaml"
 DATASETS=(hotpotqa 2wiki popqa musique)
 LIMIT="${LIMIT:-1000}"
 DRY_RUN=false
@@ -19,7 +19,7 @@ fi
 
 cd "${ROOT_DIR}"
 
-echo "[QMRAG v2 runtime ablation] candidate_pool_size=60 is an efficiency ablation, not the main default."
+echo "[ACE-RAG runtime ablation] candidate_pool_size=60 is an efficiency ablation, not the main default."
 
 for dataset in "${DATASETS[@]}"; do
   cmd=(
@@ -30,11 +30,11 @@ for dataset in "${DATASETS[@]}"; do
     --prompt-profile common_qa
     --rendering-profile structured_chain
     --retrieval-variant full_hetero
-    --seed-selection-variant top_relevance
+    --seed-selection-variant global_seed_search
     --candidate-pool-size 60
     --enable-timing
   )
-  echo "[QMRAG v2 runtime cap60 ${dataset}] ${cmd[*]}"
+  echo "[ACE-RAG runtime cap60 ${dataset}] ${cmd[*]}"
   if [[ "${DRY_RUN}" == "false" ]]; then
     "${cmd[@]}"
   fi

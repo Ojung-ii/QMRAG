@@ -1,4 +1,4 @@
-extends: qmrag_v2_common_full.yaml
+extends: ../../../config/default.yaml
 
 generation:
   prompt_profile: common_qa
@@ -10,10 +10,10 @@ generation:
 
 retrieval:
   retrieval_variant: full_hetero
-  seed_selection_variant: top_relevance
+  seed_selection_variant: global_seed_search
   candidate_cap:
-    enabled: true
-    total_candidates: 60
+    enabled: false
+    total_candidates: 80
     title_candidates: null
     chunk_candidates: null
     proposition_candidates: null
@@ -33,12 +33,11 @@ retrieval:
     use_automaton: true
 
 sota_config:
-  role: runtime_ablation_cap60
-  prompt_experiment_type: runtime_ablation
-  candidate_pool_size: 60
+  role: mainline_common_full
+  prompt_experiment_type: main_comparison
   context: full
   top_bundles: null
   context_token_budget: null
   notes:
-    - Runtime efficiency ablation only.
-    - candidate_pool_size=60 is not the main default.
+    - Main fair-comparison setting for ACE-RAG.
+    - Uses full context and common_qa prompt.
