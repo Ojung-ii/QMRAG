@@ -290,3 +290,61 @@ outputs/replay/20260526_074257/hotpotqa/common_qa_to_common_qa_top3_top3_chain_d
 Result: first 20 IDs matched, normalized predictions matched `20/20`, raw
 predictions matched `20/20`, and both runs produced `EM=0.3500`,
 `F1=0.4872`, and `context_tokens=479.4` on the smoke subset.
+
+## Full Reproduction Check
+
+On 2026-05-27, the HotpotQA common-prompt compact SOTA replay was also
+revalidated with `LIMIT=1000` using vLLM at `--gpu-memory-utilization 0.25`.
+This checks submission-readiness more strictly than the smoke test because it
+replays every query in the reported evaluation subset.
+
+```bash
+CUDA_VISIBLE_DEVICES=0 conda run -n vllm vllm serve Qwen/Qwen2.5-7B-Instruct \
+  --host 127.0.0.1 --port 8025 --gpu-memory-utilization 0.25 \
+  --max-model-len 8192 --api-key EMPTY
+
+python scripts/replay_generation.py \
+  --predictions outputs/replay/20260526_074314/hotpotqa/common_qa_to_common_qa/predictions.jsonl \
+  --dataset hotpotqa \
+  --source-prompt common_qa \
+  --source-rendering-profile structured_chain \
+  --target-prompt common_qa \
+  --limit 1000 \
+  --compaction-profile top3_chain_dedup \
+  --vllm-base-url http://127.0.0.1:8025/v1 \
+  --vllm-api-key EMPTY \
+  --vllm-model auto \
+  --temperature 0 \
+  --max-tokens 64 \
+  --output-root outputs/full_ace_rag_sota_repro_20260527
+```
+
+Full-run output:
+
+```text
+outputs/full_ace_rag_sota_repro_20260527/20260527_163158/hotpotqa/common_qa_to_common_qa_top3_top3_chain_dedup/predictions.jsonl
+```
+
+Compared with the preserved paper-table HotpotQA compact reference:
+
+```text
+outputs/replay/20260526_000338/hotpotqa/common_qa_to_common_qa_top3_top3_chain_dedup/predictions.jsonl
+```
+
+Result: IDs matched `1000/1000`, normalized predictions matched `1000/1000`,
+raw predictions matched `1000/1000`, rendered-context hashes matched
+`1000/1000`, prompt hashes matched `1000/1000`, and both runs produced
+`EM=0.3090`, `F1=0.3791`, and `context_tokens=458.2`.
+
+The same full-run output was also compared with the budget-tradeoff compact
+reference:
+
+```text
+outputs/replay/20260526_074257/hotpotqa/common_qa_to_common_qa_top3_top3_chain_dedup/predictions.jsonl
+```
+
+For that reference, IDs/context hashes/prompt hashes matched `1000/1000`.
+Predictions matched `992/1000`; the full rerun produced `EM=0.3090`,
+`F1=0.3791`, while the budget reference produced `EM=0.3060`, `F1=0.3776`.
+This difference is attributable to generation-level nondeterminism across
+separate vLLM runs; the paper-table reference remains exactly reproduced.
